@@ -24,7 +24,7 @@ end = min(len(raw), max(needles) + 185000)
 excluded = ("SettingsUI.", "submodules/", "AyuGram.", "AyuGram/",
     "Item List/", "Chat/", "Chat List/", "https://", "http://", "ayu.")
 strings = set()
-for m in re.finditer(rb"[\x20-\x7e]{4,}\x00", raw, start, end):
+for m in re.compile(rb"[\x20-\x7e]{4,}\x00").finditer(raw, start, end):
     x = m.group()[:-1].decode("utf-8", "ignore").strip()
     if not x or len(x) > 280 or x.startswith(excluded): continue
     if not re.search(r"[A-Za-z]", x): continue
