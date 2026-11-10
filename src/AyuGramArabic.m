@@ -144,6 +144,44 @@ static NSString *AGTranslate(NSString *text) {
     }
     NSString *numeric = AGTranslateNumericSummary(text);
     if (numeric) return numeric;
+
+    // Telegram's settings renderer sometimes combines several UI-only lines
+    // into one attributed string; translate complete lines independently.
+    // No heuristic substring translation is performed on arbitrary chat text.
+    if (AGIsOnAyuPage() && [text rangeOfString:@"\n"].location != NSNotFound) {
+        NSArray<NSString *> *parts = [text componentsSeparatedByString:@"\n"];
+        NSMutableArray<NSString *> *translatedParts = [NSMutableArray arrayWithCapacity:parts.count];
+        BOOL changed = NO;
+        for (NSString *line in parts) {
+            NSString *lineValue = [line stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+            NSString *lookup = AGMap()[lineValue];
+            if (!lookup) lookup = AGMap()[AGCanonicalText(lineValue)];
+            if (!lookup.length) {
+                [translatedParts addObject:line];
+            } else {
+                NSRange location = [line rangeOfString:lineValue];
+                NSString *head = [line substringToIndex:location.location];
+                NSString *tail = [line substringFromIndex:NSMaxRange(location)];
+                [translatedParts addObject:[NSString stringWithFormat:@"%@%@%@", head, lookup, tail]];
+                changed = YES;
+            }
+        }
+        if (changed) return [translatedParts componentsJoinedByString:@"\n"];
+    }
+    // Preview chat bubbles may contain timestamps in the same TextNode.
+    if (AGIsOnAyuPage()) {
+        for (NSString *example in @[@"Meet at 7", @"Meet at 7?",
+                                    @"OK, see you there 👍", @"Okay, see you there 👍"]) {
+            if ([text hasPrefix:example] && text.length > example.length) {
+                unichar following = [text characterAtIndex:example.length];
+                if ([[NSCharacterSet whitespaceAndNewlineCharacterSet] characterIsMember:following]) {
+                    NSString *translated = AGMap()[example];
+                    if (translated.length) return [translated stringByAppendingString:
+                        [text substringFromIndex:example.length]];
+                }
+            }
+        }
+    }
     // Match labels with harmless surrounding whitespace without affecting other content.
     NSString *trimmed = [text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
     if (!trimmed.length || [trimmed isEqualToString:text]) return text;
