@@ -4,6 +4,7 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <dispatch/dispatch.h>
+#import <stdatomic.h>
 #import "generated_ar.h"
 
 static NSDictionary<NSString *, NSString *> *AGMap(void) {
@@ -25,6 +26,13 @@ static BOOL AGArabicEnabled(void) {
     return preference == nil || [preference boolValue];
 }
 
+// ItemListController is used by AyuGram AND regular Telegram settings.
+// Its class name does not contain "Ayu", so we record the AyuGram root after
+// seeing its unique intro sentence, then follow the navigation stack.
+static atomic_bool AGPendingAyuRoot = ATOMIC_VAR_INIT(false);
+static atomic_bool AGInAyuStack = ATOMIC_VAR_INIT(false);
+static char AGRootMarker;
+
 static BOOL AGViewControllerHasAyu(UIViewController *controller, NSUInteger depth) {
     if (!controller || depth > 12) return NO;
     NSString *name = NSStringFromClass([controller class]);
@@ -44,6 +52,7 @@ static BOOL AGViewControllerHasAyu(UIViewController *controller, NSUInteger dept
 }
 
 static BOOL AGIsOnAyuPage(void) {
+    if (atomic_load(&AGInAyuStack) || atomic_load(&AGPendingAyuRoot)) return YES;
     if (![NSThread isMainThread]) return NO;
     UIApplication *app = UIApplication.sharedApplication;
     for (UIWindow *window in app.windows) {
@@ -79,6 +88,12 @@ static BOOL AGNeedsContext(NSString *text) {
 
 static NSString *AGTranslate(NSString *text) {
     if (!AGArabicEnabled() || ![text isKindOfClass:NSString.class] || text.length == 0) return text;
+    // This exact description belongs to the AyuGram ROOT settings page.
+    // Preserve the context while navigating its nested ItemList pages.
+    if ([text isEqualToString:@"Just an exteraGram based client with ToS breaking features in mind."]) {
+        atomic_store(&AGPendingAyuRoot, true);
+        atomic_store(&AGInAyuStack, true);
+    }
     NSString *found = AGMap()[text];
     if (found.length) {
         return AGNeedsContext(text) && !AGIsOnAyuPage() ? text : found;
@@ -348,9 +363,42 @@ static void AGInstallDiagnostics(void) {
     });
 }
 
+
+// Track navigation through the AyuGram root instead of checking class names:
+// Telegram's custom settings are ItemListController and have no Ayu prefix.
+static IMP origAyuViewDidAppear = NULL;
+static BOOL AGControllerIsWithinMarkedRoot(UIViewController *vc) {
+    for (NSUInteger depth = 0; vc && depth < 12; depth++) {
+        if (objc_getAssociatedObject(vc, &AGRootMarker)) return YES;
+        UINavigationController *nav = vc.navigationController;
+        if (nav) {
+            for (UIViewController *stackItem in nav.viewControllers) {
+                if (objc_getAssociatedObject(stackItem, &AGRootMarker)) return YES;
+            }
+        }
+        vc = vc.parentViewController ?: vc.presentingViewController;
+    }
+    return NO;
+}
+static void AGAyuViewDidAppear(UIViewController *vc, SEL sel, BOOL animated) {
+    if (origAyuViewDidAppear)
+        ((void (*)(id, SEL, BOOL))origAyuViewDidAppear)(vc, sel, animated);
+    NSString *className = NSStringFromClass([vc class]);
+    if (atomic_load(&AGPendingAyuRoot) &&
+        [className rangeOfString:@"ItemListController"].location != NSNotFound) {
+        objc_setAssociatedObject(vc, &AGRootMarker, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        atomic_store(&AGPendingAyuRoot, false);
+        NSLog(@"[AyuGramArabic] Located AyuGram root ItemListController");
+    }
+    atomic_store(&AGInAyuStack, AGControllerIsWithinMarkedRoot(vc));
+}
+
 __attribute__((constructor))
 static void AGStart(void) {
     @autoreleasepool {
+        // Context marker follows AyuGram's custom ItemListController stack.
+        AGHook(UIViewController.class, @selector(viewDidAppear:),
+               (IMP)AGAyuViewDidAppear, &origAyuViewDidAppear);
         // UIKit surfaces used by settings, sheets, dialogs and plugin lists.
         AGHook(UILabel.class, @selector(setText:), (IMP)AGUILabelText, &origUILabelText);
         AGHook(UILabel.class, @selector(setAttributedText:), (IMP)AGUILabelAttr, &origUILabelAttr);
