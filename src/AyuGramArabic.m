@@ -532,6 +532,50 @@ static BOOL AGControllerIsWithinMarkedRoot(UIViewController *vc) {
     }
     return NO;
 }
+// Some item-list controls are assigned before the AyuGram root is recognized.
+// Revisit only visible AyuGram settings controls; never rewrite chat messages.
+static void AGRefreshSettingsView(UIView *view, NSUInteger depth) {
+    if (!view || depth > 18 || view.hidden) return;
+    if ([view isKindOfClass:UILabel.class]) {
+        UILabel *label = (UILabel *)view;
+        if (label.attributedText.length) {
+            NSAttributedString *replacement = AGTranslateAttributed(label.attributedText);
+            if (replacement != label.attributedText) label.attributedText = replacement;
+        } else if (label.text.length) {
+            NSString *translation = AGTranslate(label.text);
+            if (![translation isEqualToString:label.text]) label.text = translation;
+        }
+    } else if ([view isKindOfClass:UIButton.class]) {
+        UIButton *button = (UIButton *)view;
+        for (NSNumber *state in @[@(UIControlStateNormal), @(UIControlStateSelected)]) {
+            UIControlState st = (UIControlState)state.unsignedIntegerValue;
+            NSString *old = [button titleForState:st];
+            NSString *translation = AGTranslate(old);
+            if (old.length && ![translation isEqualToString:old]) {
+                [button setTitle:translation forState:st];
+            }
+        }
+    } else if ([view isKindOfClass:UITextField.class]) {
+        UITextField *field = (UITextField *)view;
+        NSString *old = field.placeholder;
+        NSString *translation = AGTranslate(old);
+        if (old.length && ![translation isEqualToString:old]) field.placeholder = translation;
+    }
+    for (UIView *child in view.subviews) {
+        AGRefreshSettingsView(child, depth + 1);
+    }
+}
+static void AGRefreshAyuPage(UIViewController *vc) {
+    if (!vc || !vc.isViewLoaded || !AGIsOnAyuPage()) return;
+    NSString *name = NSStringFromClass(vc.class);
+    if ([name rangeOfString:@"ItemList" options:NSCaseInsensitiveSearch].location == NSNotFound &&
+        [name rangeOfString:@"Ayu" options:NSCaseInsensitiveSearch].location == NSNotFound) return;
+    NSString *old = vc.title;
+    NSString *translation = AGTranslate(old);
+    if (old.length && ![translation isEqualToString:old]) vc.title = translation;
+    AGRefreshSettingsView(vc.view, 0);
+}
+
 static void AGAyuViewDidAppear(UIViewController *vc, SEL sel, BOOL animated) {
     if (origAyuViewDidAppear)
         ((void (*)(id, SEL, BOOL))origAyuViewDidAppear)(vc, sel, animated);
@@ -545,6 +589,11 @@ static void AGAyuViewDidAppear(UIViewController *vc, SEL sel, BOOL animated) {
     BOOL inside = AGControllerIsWithinMarkedRoot(vc);
     if (inside || [className rangeOfString:@"Ayu" options:NSCaseInsensitiveSearch].location != NSNotFound) {
         atomic_store(&AGInAyuStack, true);
+        __weak UIViewController *weakVC = vc;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UIViewController *page = weakVC;
+            if (page) AGRefreshAyuPage(page);
+        });
     } else if ([className rangeOfString:@"ItemListController"].location != NSNotFound) {
         // AyuGram subsections are generic Telegram ItemListControllers. Keep
         // the last-known AyuGram context across their pushes and presentations.
