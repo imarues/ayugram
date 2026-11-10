@@ -83,6 +83,8 @@ static BOOL AGNeedsContext(NSString *text) {
             @"Repeat", @"Themes", @"Colours", @"Badges", @"Message", @"Chat"
         ]];
     });
+    // Keep short/common labels from affecting stock Telegram outside AyuGram.
+    if (text.length <= 28) return YES;
     return [ambiguous containsObject:text];
 }
 
@@ -281,6 +283,31 @@ static IMP originalConcreteImmutableAttrs = NULL;
 static IMP originalConcreteMutablePlain = NULL;
 static IMP originalConcreteMutableAttrs = NULL;
 
+// Some Telegram/Swift TextNodes clone attributed strings after adding spans.
+// Translate that path too, with reentrancy protection for mutableCopy().
+static IMP originalConcreteImmutableCopy = NULL;
+static IMP originalConcreteMutableCopy = NULL;
+static _Thread_local BOOL agInsideAttributedCopy = NO;
+
+static id AGAttributedCopyInit(id obj, SEL cmd, NSAttributedString *value, IMP original) {
+    if (!original) return obj;
+    if (!value || agInsideAttributedCopy || !AGArabicEnabled() || !AGIsOnAyuPage()) {
+        return ((id (*)(id, SEL, NSAttributedString *))original)(obj, cmd, value);
+    }
+    agInsideAttributedCopy = YES;
+    NSAttributedString *translated = AGTranslateAttributed(value);
+    id result = ((id (*)(id, SEL, NSAttributedString *))original)(obj, cmd, translated);
+    agInsideAttributedCopy = NO;
+    return result;
+}
+static id AGConcreteImmutableCopy(id obj, SEL cmd, NSAttributedString *value) {
+    return AGAttributedCopyInit(obj, cmd, value, originalConcreteImmutableCopy);
+}
+static id AGConcreteMutableCopy(id obj, SEL cmd, NSAttributedString *value) {
+    return AGAttributedCopyInit(obj, cmd, value, originalConcreteMutableCopy);
+}
+
+
 static id AGConcreteImmutablePlain(id obj, SEL cmd, NSString *value) {
     return originalConcreteImmutablePlain
         ? ((id (*)(id, SEL, NSString *))originalConcreteImmutablePlain)(obj, cmd, AGTranslate(value))
@@ -326,11 +353,15 @@ static void AGHookAttributedClusters(void) {
                    (IMP)AGConcreteImmutablePlain, &originalConcreteImmutablePlain);
     AGHookConcrete(immutableClass, @selector(initWithString:attributes:),
                    (IMP)AGConcreteImmutableAttrs, &originalConcreteImmutableAttrs);
+    AGHookConcrete(immutableClass, @selector(initWithAttributedString:),
+                   (IMP)AGConcreteImmutableCopy, &originalConcreteImmutableCopy);
     if (mutableClass != immutableClass) {
         AGHookConcrete(mutableClass, @selector(initWithString:),
                        (IMP)AGConcreteMutablePlain, &originalConcreteMutablePlain);
         AGHookConcrete(mutableClass, @selector(initWithString:attributes:),
                        (IMP)AGConcreteMutableAttrs, &originalConcreteMutableAttrs);
+        AGHookConcrete(mutableClass, @selector(initWithAttributedString:),
+                       (IMP)AGConcreteMutableCopy, &originalConcreteMutableCopy);
     }
 }
 
