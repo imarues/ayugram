@@ -86,22 +86,67 @@ static BOOL AGNeedsContext(NSString *text) {
     return [ambiguous containsObject:text];
 }
 
+
+static NSString *AGCanonicalText(NSString *text) {
+    if (!text || text.length == 0) return text;
+    NSString *value = [text stringByReplacingOccurrencesOfString:@"\u00a0" withString:@" "];
+    value = [value stringByReplacingOccurrencesOfString:@"\u200b" withString:@""];
+    value = [value stringByReplacingOccurrencesOfString:@"\u2026" withString:@"..."];
+    value = [value stringByReplacingOccurrencesOfString:@"\u2019" withString:@"'"];
+    value = [value stringByReplacingOccurrencesOfString:@"\u201c" withString:@"\""];
+    value = [value stringByReplacingOccurrencesOfString:@"\u201d" withString:@"\""];
+    return value;
+}
+static NSString *AGTranslateNumericSummary(NSString *text) {
+    if (!AGIsOnAyuPage()) return nil;
+    static NSRegularExpression *countPattern, *secondsPattern;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        countPattern = [NSRegularExpression regularExpressionWithPattern:@"^([0-9]+) of ([0-9]+)$"
+            options:0 error:NULL];
+        secondsPattern = [NSRegularExpression regularExpressionWithPattern:@"^([0-9]+) (seconds?|minutes?)$"
+            options:NSRegularExpressionCaseInsensitive error:NULL];
+    });
+    NSTextCheckingResult *m = [countPattern firstMatchInString:text options:0
+        range:NSMakeRange(0, text.length)];
+    if (m && m.range.length == text.length) {
+        NSString *a = [text substringWithRange:[m rangeAtIndex:1]];
+        NSString *b = [text substringWithRange:[m rangeAtIndex:2]];
+        return [NSString stringWithFormat:@"%@ من %@", a, b];
+    }
+    m = [secondsPattern firstMatchInString:text options:0 range:NSMakeRange(0,text.length)];
+    if (m && m.range.length == text.length) {
+        NSString *a = [text substringWithRange:[m rangeAtIndex:1]];
+        NSString *unit = [text substringWithRange:[m rangeAtIndex:2]];
+        return [NSString stringWithFormat:@"%@ %@", a,
+            [[unit lowercaseString] hasPrefix:@"second"] ? @"ثانية" : @"دقيقة"];
+    }
+    return nil;
+}
+
 static NSString *AGTranslate(NSString *text) {
     if (!AGArabicEnabled() || ![text isKindOfClass:NSString.class] || text.length == 0) return text;
     // This exact description belongs to the AyuGram ROOT settings page.
     // Preserve the context while navigating its nested ItemList pages.
-    if ([text isEqualToString:@"Just an exteraGram based client with ToS breaking features in mind."]) {
+    if ([text isEqualToString:@"Just an exteraGram based client with ToS breaking features in mind."] ||
+        [text isEqualToString:@"CATEGORIES"] ||
+        [text isEqualToString:@"Ghost Mode by chat"] ||
+        [text isEqualToString:@"ACTIVITY STATUSES"]) {
         atomic_store(&AGPendingAyuRoot, true);
         atomic_store(&AGInAyuStack, true);
     }
     NSString *found = AGMap()[text];
+    if (!found) found = AGMap()[AGCanonicalText(text)];
     if (found.length) {
         return AGNeedsContext(text) && !AGIsOnAyuPage() ? text : found;
     }
+    NSString *numeric = AGTranslateNumericSummary(text);
+    if (numeric) return numeric;
     // Match labels with harmless surrounding whitespace without affecting other content.
     NSString *trimmed = [text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
     if (!trimmed.length || [trimmed isEqualToString:text]) return text;
     found = AGMap()[trimmed];
+    if (!found) found = AGMap()[AGCanonicalText(trimmed)];
     if (!found.length || (AGNeedsContext(trimmed) && !AGIsOnAyuPage())) return text;
     NSRange range = [text rangeOfString:trimmed];
     if (range.location == NSNotFound) return text;
@@ -390,7 +435,19 @@ static void AGAyuViewDidAppear(UIViewController *vc, SEL sel, BOOL animated) {
         atomic_store(&AGPendingAyuRoot, false);
         NSLog(@"[AyuGramArabic] Located AyuGram root ItemListController");
     }
-    atomic_store(&AGInAyuStack, AGControllerIsWithinMarkedRoot(vc));
+    BOOL inside = AGControllerIsWithinMarkedRoot(vc);
+    if (inside || [className rangeOfString:@"Ayu" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+        atomic_store(&AGInAyuStack, true);
+    } else if ([className rangeOfString:@"ItemListController"].location != NSNotFound) {
+        // AyuGram subsections are generic Telegram ItemListControllers. Keep
+        // the last-known AyuGram context across their pushes and presentations.
+    } else if ([className rangeOfString:@"ChatController"].location != NSNotFound ||
+               [className rangeOfString:@"SettingsController"].location != NSNotFound ||
+               [className rangeOfString:@"AccountController"].location != NSNotFound) {
+        // Restore ordinary Telegram when the user leaves AyuGram pages.
+        atomic_store(&AGInAyuStack, false);
+        atomic_store(&AGPendingAyuRoot, false);
+    }
 }
 
 __attribute__((constructor))
@@ -423,7 +480,9 @@ static void AGStart(void) {
         // Fix Telegram-specific custom TextNodes.
         AGHookTelegramTextNodes();
         // Temporary on-screen proof that the injector actually loaded this dylib.
-        AGInstallDiagnostics();
+        if ([[NSUserDefaults standardUserDefaults] boolForKey:@"AyuGramArabicDiagnostics"]) {
+            AGInstallDiagnostics();
+        }
         // AsyncDisplayKit text nodes can receive already-initialized attributed text.
         Class asTextNode = NSClassFromString(@"ASTextNode");
         if (asTextNode) AGHook(asTextNode, @selector(setAttributedText:),
