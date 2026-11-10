@@ -102,14 +102,52 @@ static NSString *AGCanonicalText(NSString *text) {
 static NSString *AGTranslateNumericSummary(NSString *text) {
     if (!AGIsOnAyuPage()) return nil;
     static NSRegularExpression *countPattern, *secondsPattern;
+    static NSRegularExpression *archivePattern, *fileCountPattern, *capacityPattern;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         countPattern = [NSRegularExpression regularExpressionWithPattern:@"^([0-9]+) of ([0-9]+)$"
             options:0 error:NULL];
         secondsPattern = [NSRegularExpression regularExpressionWithPattern:@"^([0-9]+) (seconds?|minutes?)$"
             options:NSRegularExpressionCaseInsensitive error:NULL];
+        // The media archive mixes an English count and English "of" with
+        // the device-localized size, e.g. "0 files · 0 KB · of 250 MB".
+        // Preserve the original values/units while translating only the labels.
+        archivePattern = [NSRegularExpression regularExpressionWithPattern:
+            @"^([0-9]+)\\s+files?\\s*[·•]\\s*(.+?)\\s*[·•]\\s*of\\s+([0-9]+)\\s+(MB|GB)$"
+            options:NSRegularExpressionCaseInsensitive error:NULL];
+        fileCountPattern = [NSRegularExpression regularExpressionWithPattern:
+            @"^([0-9]+)\\s+files?$"
+            options:NSRegularExpressionCaseInsensitive error:NULL];
+        capacityPattern = [NSRegularExpression regularExpressionWithPattern:
+            @"^of\\s+([0-9]+)\\s+(MB|GB)$"
+            options:NSRegularExpressionCaseInsensitive error:NULL];
     });
-    NSTextCheckingResult *m = [countPattern firstMatchInString:text options:0
+    NSTextCheckingResult *m = [archivePattern firstMatchInString:text options:0
+        range:NSMakeRange(0, text.length)];
+    if (m && m.range.length == text.length) {
+        NSString *count = [text substringWithRange:[m rangeAtIndex:1]];
+        NSString *size = [text substringWithRange:[m rangeAtIndex:2]];
+        NSString *limit = [text substringWithRange:[m rangeAtIndex:3]];
+        NSString *unit = [text substringWithRange:[m rangeAtIndex:4]];
+        return [NSString stringWithFormat:@"%@ %@ · %@ · من %@ %@",
+                count, count.integerValue == 1 ? @"ملف" : @"ملفات",
+                size, limit, unit];
+    }
+    m = [fileCountPattern firstMatchInString:text options:0
+        range:NSMakeRange(0, text.length)];
+    if (m && m.range.length == text.length) {
+        NSString *count = [text substringWithRange:[m rangeAtIndex:1]];
+        return [NSString stringWithFormat:@"%@ %@",
+                count, count.integerValue == 1 ? @"ملف" : @"ملفات"];
+    }
+    m = [capacityPattern firstMatchInString:text options:0
+        range:NSMakeRange(0, text.length)];
+    if (m && m.range.length == text.length) {
+        NSString *limit = [text substringWithRange:[m rangeAtIndex:1]];
+        NSString *unit = [text substringWithRange:[m rangeAtIndex:2]];
+        return [NSString stringWithFormat:@"من %@ %@", limit, unit];
+    }
+    m = [countPattern firstMatchInString:text options:0
         range:NSMakeRange(0, text.length)];
     if (m && m.range.length == text.length) {
         NSString *a = [text substringWithRange:[m rangeAtIndex:1]];
