@@ -210,6 +210,144 @@ static void AGHook(Class cls, SEL selector, IMP replacement, IMP *original) {
     if (*original != replacement) method_setImplementation(m, replacement);
 }
 
+
+#pragma mark - Concrete attributed text classes and Telegram text nodes
+
+// NSAttributedString is a class cluster: Swift's NSAttributedString(string:)
+// creates concrete objects. Swizzling only the public base class was ineffective
+// for several custom Telegram ItemList/TextNode UI components.
+static IMP originalConcreteImmutablePlain = NULL;
+static IMP originalConcreteImmutableAttrs = NULL;
+static IMP originalConcreteMutablePlain = NULL;
+static IMP originalConcreteMutableAttrs = NULL;
+
+static id AGConcreteImmutablePlain(id obj, SEL cmd, NSString *value) {
+    return originalConcreteImmutablePlain
+        ? ((id (*)(id, SEL, NSString *))originalConcreteImmutablePlain)(obj, cmd, AGTranslate(value))
+        : obj;
+}
+static id AGConcreteImmutableAttrs(id obj, SEL cmd, NSString *value, NSDictionary *attrs) {
+    return originalConcreteImmutableAttrs
+        ? ((id (*)(id, SEL, NSString *, NSDictionary *))originalConcreteImmutableAttrs)
+          (obj, cmd, AGTranslate(value), attrs)
+        : obj;
+}
+static id AGConcreteMutablePlain(id obj, SEL cmd, NSString *value) {
+    return originalConcreteMutablePlain
+        ? ((id (*)(id, SEL, NSString *))originalConcreteMutablePlain)(obj, cmd, AGTranslate(value))
+        : obj;
+}
+static id AGConcreteMutableAttrs(id obj, SEL cmd, NSString *value, NSDictionary *attrs) {
+    return originalConcreteMutableAttrs
+        ? ((id (*)(id, SEL, NSString *, NSDictionary *))originalConcreteMutableAttrs)
+          (obj, cmd, AGTranslate(value), attrs)
+        : obj;
+}
+
+static void AGHookConcrete(Class cls, SEL selector, IMP impl, IMP *original) {
+    if (!cls) return;
+    Method m = class_getInstanceMethod(cls, selector);
+    if (!m) return;
+    *original = method_getImplementation(m);
+    if (*original == impl) return;
+    // class_replaceMethod overrides an inherited method on this concrete class,
+    // unlike method_setImplementation which may patch the superclass globally.
+    class_replaceMethod(cls, selector, impl, method_getTypeEncoding(m));
+}
+
+static void AGHookAttributedClusters(void) {
+    NSAttributedString *immutable = [[NSAttributedString alloc] initWithString:@"Arabic diagnostic"];
+    NSMutableAttributedString *mutable = [[NSMutableAttributedString alloc] initWithString:@"Arabic diagnostic"];
+    Class immutableClass = object_getClass(immutable);
+    Class mutableClass = object_getClass(mutable);
+    NSLog(@"[AyuGramArabic] Cluster classes: %@ / %@",
+          NSStringFromClass(immutableClass), NSStringFromClass(mutableClass));
+    AGHookConcrete(immutableClass, @selector(initWithString:),
+                   (IMP)AGConcreteImmutablePlain, &originalConcreteImmutablePlain);
+    AGHookConcrete(immutableClass, @selector(initWithString:attributes:),
+                   (IMP)AGConcreteImmutableAttrs, &originalConcreteImmutableAttrs);
+    if (mutableClass != immutableClass) {
+        AGHookConcrete(mutableClass, @selector(initWithString:),
+                       (IMP)AGConcreteMutablePlain, &originalConcreteMutablePlain);
+        AGHookConcrete(mutableClass, @selector(initWithString:attributes:),
+                       (IMP)AGConcreteMutableAttrs, &originalConcreteMutableAttrs);
+    }
+}
+
+// ASTextNode is not the only Telegram text renderer. ImmediateTextNode and
+// TextNode are common in the ItemList controllers used by AyuGram settings.
+static IMP origImmediateTextAttributed = NULL;
+static IMP origTelegramTextAttributed = NULL;
+static void AGImmediateTextAttributed(id obj, SEL cmd, NSAttributedString *value) {
+    AG_CALL_VOID3(origImmediateTextAttributed, obj, cmd, AGTranslateAttributed(value));
+}
+static void AGTelegramTextAttributed(id obj, SEL cmd, NSAttributedString *value) {
+    AG_CALL_VOID3(origTelegramTextAttributed, obj, cmd, AGTranslateAttributed(value));
+}
+
+static void AGHookTelegramTextNodes(void) {
+    // Hook only methods implemented on a specific class (not inherited).
+    Class immediate = NSClassFromString(@"ImmediateTextNode");
+    if (immediate) {
+        Method m = class_getInstanceMethod(immediate, @selector(setAttributedText:));
+        if (m) AGHookConcrete(immediate, @selector(setAttributedText:),
+                              (IMP)AGImmediateTextAttributed, &origImmediateTextAttributed);
+    }
+    Class textNode = NSClassFromString(@"TextNode");
+    if (textNode && textNode != immediate) {
+        Method m = class_getInstanceMethod(textNode, @selector(setAttributedText:));
+        if (m) AGHookConcrete(textNode, @selector(setAttributedText:),
+                              (IMP)AGTelegramTextAttributed, &origTelegramTextAttributed);
+    }
+}
+
+#pragma mark - Short diagnostic toast for this unverified injection build
+
+static void AGShowLoadedToast(void) {
+    UIApplication *app = UIApplication.sharedApplication;
+    UIWindow *targetWindow = nil;
+    for (UIWindow *w in app.windows) {
+        if (!w.hidden && w.rootViewController && (!targetWindow || w.isKeyWindow)) {
+            targetWindow = w;
+        }
+    }
+    if (!targetWindow) return;
+    UILabel *notice = [[UILabel alloc] initWithFrame:CGRectZero];
+    notice.text = @"AyuGramArabic v2 — تم تحميل الديلب";
+    notice.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+    notice.textAlignment = NSTextAlignmentCenter;
+    notice.textColor = UIColor.whiteColor;
+    notice.backgroundColor = [UIColor colorWithRed:0.24 green:0.16 blue:0.52 alpha:0.96];
+    notice.layer.cornerRadius = 13;
+    notice.layer.masksToBounds = YES;
+    notice.userInteractionEnabled = NO;
+    CGFloat w = MIN(CGRectGetWidth(targetWindow.bounds) - 32, 310);
+    notice.frame = CGRectMake((CGRectGetWidth(targetWindow.bounds) - w)/2.0,
+                             targetWindow.safeAreaInsets.top + 12, w, 38);
+    [targetWindow addSubview:notice];
+    [UIView animateWithDuration:0.3 delay:9.0 options:UIViewAnimationOptionCurveEaseOut
+                     animations:^{ notice.alpha = 0.0; }
+                     completion:^(__unused BOOL finished){ [notice removeFromSuperview]; }];
+}
+static void AGScheduleLoadedToast(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.7*NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{ AGShowLoadedToast(); });
+    });
+}
+static void AGInstallDiagnostics(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [[NSNotificationCenter defaultCenter]
+            addObserverForName:UIApplicationDidBecomeActiveNotification
+            object:nil queue:NSOperationQueue.mainQueue
+            usingBlock:^(__unused NSNotification *note){ AGScheduleLoadedToast(); }];
+        if (UIApplication.sharedApplication.applicationState == UIApplicationStateActive) {
+            AGScheduleLoadedToast();
+        }
+    });
+}
+
 __attribute__((constructor))
 static void AGStart(void) {
     @autoreleasepool {
@@ -232,6 +370,12 @@ static void AGStart(void) {
                (IMP)AGAttributedInit, &origAttributedInit);
         AGHook(NSAttributedString.class, @selector(initWithString:attributes:),
                (IMP)AGAttributedInitAttrs, &origAttributedInitAttrs);
+        // Fix Swift/Foundation class-cluster dispatch paths.
+        AGHookAttributedClusters();
+        // Fix Telegram-specific custom TextNodes.
+        AGHookTelegramTextNodes();
+        // Temporary on-screen proof that the injector actually loaded this dylib.
+        AGInstallDiagnostics();
         // AsyncDisplayKit text nodes can receive already-initialized attributed text.
         Class asTextNode = NSClassFromString(@"ASTextNode");
         if (asTextNode) AGHook(asTextNode, @selector(setAttributedText:),
