@@ -42,6 +42,14 @@ jobs:
             -Wl,-install_name,@rpath/AyuGramNotificationBridge.dylib \
             -o dist/AyuGramNotificationBridge.dylib
           file dist/AyuGramNotificationBridge.dylib
+          xcrun --sdk iphoneos clang \
+            -arch arm64 -miphoneos-version-min=15.0 \
+            -isysroot "$SDK" -fobjc-arc -fmodules -O2 \
+            -dynamiclib src/AyuGramNotificationProbe.m \
+            -framework Foundation -framework UserNotifications \
+            -Wl,-install_name,@rpath/AyuGramNotificationProbe.dylib \
+            -o dist/AyuGramNotificationProbe.dylib
+          file dist/AyuGramNotificationProbe.dylib
           shasum -a 256 dist/*.dylib > dist/SHA256SUMS.txt
       - uses: actions/upload-artifact@v4
         with:
