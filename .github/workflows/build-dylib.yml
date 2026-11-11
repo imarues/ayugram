@@ -34,7 +34,15 @@ jobs:
             -Wl,-install_name,@rpath/AyuGramArabic.dylib \
             -o dist/AyuGramArabic.dylib
           file dist/AyuGramArabic.dylib
-          shasum -a 256 dist/AyuGramArabic.dylib > dist/SHA256SUMS.txt
+          xcrun --sdk iphoneos clang \
+            -arch arm64 -miphoneos-version-min=15.0 \
+            -isysroot "$SDK" -fobjc-arc -fmodules -O2 \
+            -dynamiclib src/AyuGramNotificationBridge.m \
+            -framework Foundation -framework Security \
+            -Wl,-install_name,@rpath/AyuGramNotificationBridge.dylib \
+            -o dist/AyuGramNotificationBridge.dylib
+          file dist/AyuGramNotificationBridge.dylib
+          shasum -a 256 dist/*.dylib > dist/SHA256SUMS.txt
       - uses: actions/upload-artifact@v4
         with:
           name: AyuGramArabic-iOS15-arm64
