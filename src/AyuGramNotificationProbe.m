@@ -5,9 +5,21 @@
 #import <objc/runtime.h>
 #import <stdlib.h>
 #import <string.h>
+#import <stdatomic.h>
 
 static IMP AGOriginalReceive = NULL;
-static const NSString *AGProbeMarker = @"[NSE ✓] ";
+static IMP AGOriginalGroupContainer = NULL;
+static atomic_int AGGroupStatus = ATOMIC_VAR_INIT(0); // -1 denied; 1 found; 0 not requested
+
+static NSURL *AGProbeGroupContainer(NSFileManager *fm, SEL sel, NSString *group) {
+    NSURL *url = AGOriginalGroupContainer ?
+      ((NSURL *(*)(id,SEL,NSString *))AGOriginalGroupContainer)(fm,sel,group) : nil;
+    if ([group hasPrefix:@"group."]) {
+        if (!url) atomic_store(&AGGroupStatus,-1);
+        else if (atomic_load(&AGGroupStatus)==0) atomic_store(&AGGroupStatus,1);
+    }
+    return url;
+}
 
 static void AGProbeReceive(id self, SEL cmd, UNNotificationRequest *request, void (^handler)(UNNotificationContent *)) {
     IMP original = AGOriginalReceive;
@@ -17,8 +29,11 @@ static void AGProbeReceive(id self, SEL cmd, UNNotificationRequest *request, voi
         UNMutableNotificationContent *copy = [content mutableCopy];
         // A non-persistent debug marker only; retains the original sender/body.
         NSString *title = copy.title ?: @"";
-        if (![title hasPrefix:(NSString *)AGProbeMarker]) {
-            copy.title = [(NSString *)AGProbeMarker stringByAppendingString:title];
+        if (![title hasPrefix:@"[NSE:"]) {
+            int status=atomic_load(&AGGroupStatus);
+            NSString *marker=status < 0 ? @"[NSE: group denied] " :
+                status > 0 ? @"[NSE: group OK] " : @"[NSE: callback] ";
+            copy.title = [marker stringByAppendingString:title];
         }
         handler(copy);
     };
@@ -26,6 +41,13 @@ static void AGProbeReceive(id self, SEL cmd, UNNotificationRequest *request, voi
 }
 
 __attribute__((constructor)) static void AGProbeInstall(void) {
+    Method gm=class_getInstanceMethod(NSFileManager.class,
+        @selector(containerURLForSecurityApplicationGroupIdentifier:));
+    if (gm) {
+        AGOriginalGroupContainer=method_getImplementation(gm);
+        if (AGOriginalGroupContainer != (IMP)AGProbeGroupContainer)
+            method_setImplementation(gm,(IMP)AGProbeGroupContainer);
+    }
     Class base = [UNNotificationServiceExtension class];
     int n=objc_getClassList(NULL,0);
     if (n <= 0 || n>100000) return;
