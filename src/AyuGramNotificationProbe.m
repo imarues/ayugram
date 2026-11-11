@@ -3,6 +3,8 @@
 #import <Foundation/Foundation.h>
 #import <UserNotifications/UserNotifications.h>
 #import <objc/runtime.h>
+#import <stdlib.h>
+#import <string.h>
 
 static IMP AGOriginalReceive = NULL;
 static const NSString *AGProbeMarker = @"[NSE ✓] ";
@@ -27,7 +29,7 @@ __attribute__((constructor)) static void AGProbeInstall(void) {
     Class base = [UNNotificationServiceExtension class];
     int n=objc_getClassList(NULL,0);
     if (n <= 0 || n>100000) return;
-    Class *classes=calloc((size_t)n,sizeof(Class));
+    Class __unsafe_unretained *classes=(Class __unsafe_unretained *)calloc((size_t)n,sizeof(Class));
     if (!classes) return;
     int actual=objc_getClassList(classes,n);
     SEL selector=@selector(didReceiveNotificationRequest:withContentHandler:);
