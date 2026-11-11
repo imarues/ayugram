@@ -11,30 +11,15 @@ typedef NSURL *(*AGOriginalContainerFn)(id, SEL, NSString *);
 static AGOriginalContainerFn agOriginalContainerURL = NULL;
 static NSString *agSharedGroup = nil;
 
+// The patcher sets the same group in both app and notification extension Info.plists.
+// This must be an App Group explicitly granted to BOTH signed targets.
 static NSString *AGAllowedSharedGroup(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        SecTaskRef task = SecTaskCreateFromSelf(kCFAllocatorDefault);
-        if (!task) return;
-        CFErrorRef error = NULL;
-        CFTypeRef entitled = SecTaskCopyValueForEntitlement(task,
-            CFSTR("com.apple.security.application-groups"), &error);
-        CFRelease(task);
-        if (error) CFRelease(error);
-        if (entitled) {
-            if (CFGetTypeID(entitled) == CFArrayGetTypeID()) {
-                NSArray *groups = CFBridgingRelease(entitled);
-                NSMutableArray<NSString *> *valid = [NSMutableArray array];
-                for (id item in groups) {
-                    if ([item isKindOfClass:NSString.class] && [item hasPrefix:@"group."]) {
-                        [valid addObject:item];
-                    }
-                }
-                [valid sortUsingSelector:@selector(compare:)];
-                agSharedGroup = [valid.firstObject copy];
-            } else {
-                CFRelease(entitled);
-            }
+        id configured = [NSBundle.mainBundle objectForInfoDictionaryKey:@"AyuGramBridgeGroup"];
+        if ([configured isKindOfClass:NSString.class] &&
+            [configured hasPrefix:@"group."] && [configured length] < 256) {
+            agSharedGroup = [configured copy];
         }
     });
     return agSharedGroup;
