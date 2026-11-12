@@ -39,6 +39,7 @@ static atomic_bool AGPendingAyuRoot = ATOMIC_VAR_INIT(false);
 static atomic_bool AGInVoidStack = ATOMIC_VAR_INIT(false);
 static char AGRootMarker;
 static char AGChildMarker; // each visited VoidGram sub-page remains identifiable after returning
+static void AGCaptureFooterHeader(id object, NSString *value);
 static BOOL AGControllerIsWithinMarkedRoot(UIViewController *vc);
 
 static UIViewController *AGVisibleController(UIViewController *controller, NSUInteger depth) {
@@ -361,10 +362,12 @@ static NSAttributedString *AGTranslateAttributed(NSAttributedString *original) {
 
 static IMP origUILabelText = NULL;
 static void AGUILabelText(UILabel *obj, SEL cmd, NSString *value) {
+    AGCaptureFooterHeader(obj, value);
     AG_CALL_VOID3(origUILabelText, obj, cmd, AGTranslate(value));
 }
 static IMP origUILabelAttr = NULL;
 static void AGUILabelAttr(UILabel *obj, SEL cmd, NSAttributedString *value) {
+    AGCaptureFooterHeader(obj, value.string);
     AG_CALL_VOID3(origUILabelAttr, obj, cmd, AGTranslateAttributed(value));
 }
 static IMP origUITextViewText = NULL;
@@ -422,6 +425,7 @@ static id AGAttributedInitAttrs(id obj, SEL cmd, NSString *value, NSDictionary *
 }
 static IMP origASAttributed = NULL;
 static void AGASAttributed(id obj, SEL cmd, NSAttributedString *value) {
+    AGCaptureFooterHeader(obj, value.string);
     AG_CALL_VOID3(origASAttributed, obj, cmd, AGTranslateAttributed(value));
 }
 static IMP origAlertFactory = NULL;
@@ -550,9 +554,11 @@ static void AGHookAttributedClusters(void) {
 static IMP origImmediateTextAttributed = NULL;
 static IMP origTelegramTextAttributed = NULL;
 static void AGImmediateTextAttributed(id obj, SEL cmd, NSAttributedString *value) {
+    AGCaptureFooterHeader(obj, value.string);
     AG_CALL_VOID3(origImmediateTextAttributed, obj, cmd, AGTranslateAttributed(value));
 }
 static void AGTelegramTextAttributed(id obj, SEL cmd, NSAttributedString *value) {
+    AGCaptureFooterHeader(obj, value.string);
     AG_CALL_VOID3(origTelegramTextAttributed, obj, cmd, AGTranslateAttributed(value));
 }
 
@@ -726,9 +732,28 @@ static BOOL AGIsStockTelegramPage(UIViewController *vc) {
 // This must never run on category pages (Privacy, More, Tools, etc).
 static __weak UIViewController *AGForegroundVoidController;
 static NSTimer *AGRootFooterTimer;
+static __weak id AGLinksHeaderObject;
+static char AGRootFooterMaskMarker;
 static char AGHiddenFooterMarker;
 static char AGPreviousFooterTouch;
 
+static BOOL AGIsLinksHeaderText(NSString *value) {
+    if (!value.length || value.length > 40) return NO;
+    NSString *str = [[AGNormalizedUILabel(value)
+                       stringByTrimmingCharactersInSet:
+                       [NSCharacterSet whitespaceAndNewlineCharacterSet]]
+                     lowercaseString];
+    return [str isEqualToString:@"links"] ||
+           [str isEqualToString:@"الروابط"] ||
+           [str isEqualToString:@"ссылки"];
+}
+static void AGCaptureFooterHeader(id object, NSString *value) {
+    if (![NSThread isMainThread] || !AGIsLinksHeaderText(value) ||
+        !AGArabicEnabled() || !AGIsOnAyuPage()) return;
+    // Capture the *actual* section-header text node while it is rendered,
+    // not a UILabel assumed to exist in a Swift/AsyncDisplayKit ListView.
+    AGLinksHeaderObject = object;
+}
 static id AGCallObjectGetter(id obj, NSString *selector) {
     if (!obj) return nil;
     SEL sel = NSSelectorFromString(selector);
@@ -843,10 +868,100 @@ static void AGCollectFooterRows(UIView *view, UIView *rootView,
     }
 }
 
+static UIView *AGFooterHeaderViewIn(UIView *view, NSUInteger depth,
+                                      NSUInteger *remaining) {
+    if (!view || !remaining || *remaining == 0 || depth > 35) return nil;
+    --(*remaining);
+    if (AGIsLinksHeaderText(AGVisibleTextFromObject(view))) return view;
+    id node = AGNodeForView(view);
+    if (node && AGIsLinksHeaderText(AGVisibleTextFromObject(node))) return view;
+    for (UIView *subview in view.subviews) {
+        UIView *hit = AGFooterHeaderViewIn(subview, depth + 1, remaining);
+        if (hit) return hit;
+    }
+    return nil;
+}
+static UIView *AGFooterHeaderView(UIViewController *root) {
+    id candidate = AGLinksHeaderObject;
+    UIView *view = [candidate isKindOfClass:UIView.class] ? (UIView *)candidate :
+        AGCallObjectGetter(candidate, @"view");
+    if ([view isKindOfClass:UIView.class] &&
+        [view isDescendantOfView:root.view]) return view;
+    NSUInteger remaining = 1600;
+    return AGFooterHeaderViewIn(root.view, 0, &remaining);
+}
+static UIScrollView *AGFooterScrollContainer(UIView *view, UIView *rootView) {
+    for (UIView *parent = view.superview; parent && parent != rootView;
+         parent = parent.superview) {
+        if ([parent isKindOfClass:UIScrollView.class] &&
+            ((UIScrollView *)parent).scrollEnabled) return (UIScrollView *)parent;
+    }
+    return nil;
+}
+// Do not wait to discover/hide every custom row: prevent the native list from
+// ever scrolling into the LINKS section in the first place. The last upper
+// feature entry ("More") remains accessible, and all lower content stays
+// physically outside the viewport. The section header supplies the cutoff.
+static BOOL AGKeepFooterOutsideViewport(UIViewController *root) {
+    UIView *header = AGFooterHeaderView(root);
+    if (!header) return NO;
+    UIScrollView *scroll = AGFooterScrollContainer(header, root.view);
+    if (!scroll || scroll.contentSize.height <= CGRectGetHeight(scroll.bounds)) return NO;
+    CGRect frameInRoot = [header convertRect:header.bounds toView:root.view];
+    CGFloat bottom = CGRectGetMaxY(root.view.bounds) -
+                     MAX(root.view.safeAreaInsets.bottom, 8.0) - 8.0;
+    CGFloat overflow = bottom - CGRectGetMinY(frameInRoot);
+    if (overflow > 2.0 && scroll.isDragging == NO) {
+        CGFloat minimum = -scroll.adjustedContentInset.top;
+        CGFloat destination = MAX(minimum, scroll.contentOffset.y - overflow);
+        if (destination + 2.0 < scroll.contentOffset.y) {
+            [scroll setContentOffset:CGPointMake(scroll.contentOffset.x, destination)
+                           animated:NO];
+        }
+    }
+    return YES;
+}
+// The exact root ListView implementation may not expose a UIScrollView.
+// In that case place an opaque, root-only cover from the LINKS heading down.
+// This does not replace any subpage view, feature item, or account settings.
+static void AGApplyFooterCover(UIViewController *root) {
+    UIView *header = AGFooterHeaderView(root);
+    UIView *cover = objc_getAssociatedObject(root, &AGRootFooterMaskMarker);
+    if (!header) {
+        if (cover) cover.hidden = YES;
+        return;
+    }
+    if (!cover) {
+        cover = [[UIView alloc] initWithFrame:CGRectZero];
+        cover.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+        cover.accessibilityElementsHidden = YES;
+        cover.userInteractionEnabled = YES; // invisible link actions are blocked
+        cover.backgroundColor = root.view.backgroundColor ?: UIColor.blackColor;
+        objc_setAssociatedObject(root, &AGRootFooterMaskMarker, cover,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    CGRect rect = [header convertRect:header.bounds toView:root.view];
+    CGFloat cutoff = MAX(0.0, MIN(CGRectGetHeight(root.view.bounds),
+                                   CGRectGetMinY(rect) - 14.0));
+    cover.frame = CGRectMake(0, cutoff, CGRectGetWidth(root.view.bounds),
+                             MAX(0.0, CGRectGetHeight(root.view.bounds) - cutoff));
+    cover.hidden = cover.frame.size.height <= 0;
+    if (cover.superview != root.view) [root.view addSubview:cover];
+    else [root.view bringSubviewToFront:cover];
+}
+
 static void AGHideLinksAndCreditsOnRoot(UIViewController *root) {
     if (!root || AGForegroundVoidController != root ||
         !objc_getAssociatedObject(root, &AGRootMarker) || !root.isViewLoaded ||
         !root.view.window) return;
+    // First attempt a zero-gap scroll cutoff using the actual LINKS header.
+    // Fall back to a cover for non-UIScrollView Telegram list implementations.
+    if (AGKeepFooterOutsideViewport(root)) {
+        UIView *cover = objc_getAssociatedObject(root, &AGRootFooterMaskMarker);
+        if (cover) cover.hidden = YES;
+    } else {
+        AGApplyFooterCover(root);
+    }
     NSMutableSet<UIView *> *toHide = [NSMutableSet set];
     NSMutableSet<UIView *> *previous = [NSMutableSet set];
     NSUInteger remaining = 1500; // bounded and root-only: no app-wide polling
@@ -944,9 +1059,14 @@ static void AGAyuViewDidAppear(UIViewController *vc, SEL sel, BOOL animated) {
                     atomic_load(&AGInVoidStack);
     if (isScoped) {
         atomic_store(&AGInVoidStack, true);
-        AGForegroundVoidController = vc;
+        // Only a marked ROOT controller owns the footer monitor. The former
+        // code overwrote the root with unrelated child viewDidAppear events,
+        // causing every timer tick to bail out before hiding anything.
         if (objc_getAssociatedObject(vc, &AGRootMarker)) {
+            AGForegroundVoidController = vc;
             AGMonitorRootFooter(vc);
+        } else if (objc_getAssociatedObject(vc, &AGChildMarker)) {
+            AGForegroundVoidController = nil;
         }
         // This ItemListController may be re-presented without rebuilding
         // the unique VoidGram intro or its previous strings.
