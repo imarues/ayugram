@@ -37,6 +37,7 @@ static atomic_bool AGPendingAyuRoot = ATOMIC_VAR_INIT(false);
 // pushes; clear it as soon as stock Telegram controllers become active.
 static atomic_bool AGInVoidStack = ATOMIC_VAR_INIT(false);
 static char AGRootMarker;
+static char AGChildMarker; // each visited VoidGram sub-page remains identifiable after returning
 static BOOL AGControllerIsWithinMarkedRoot(UIViewController *vc);
 
 static UIViewController *AGVisibleController(UIViewController *controller, NSUInteger depth) {
@@ -645,7 +646,11 @@ static void AGRefreshAyuPage(UIViewController *vc) {
     // again on each appearance can lock up gesture-heavy ItemList screens.
     // Only the root needs a one-time catch-up pass because it was constructed
     // before we detected the unique VoidGram intro text.
-    if (objc_getAssociatedObject(vc, &AGRootMarker)) {
+    if (objc_getAssociatedObject(vc, &AGRootMarker) ||
+        objc_getAssociatedObject(vc, &AGChildMarker)) {
+        // Revisit cached text exactly once per appearance, not during every
+        // layout pass. This restores labels retained in English while the
+        // scope had temporarily been inactive.
         AGRefreshSettingsView(vc.view, 0);
     }
 }
@@ -667,12 +672,24 @@ static BOOL AGIsStockTelegramPage(UIViewController *vc) {
 
 static IMP origAyuViewWillAppear = NULL;
 static void AGAyuViewWillAppear(UIViewController *vc, SEL sel, BOOL animated) {
-    // Do this BEFORE the original method builds the new screen's labels.
-    if (AGIsStockTelegramPage(vc)) {
+    // Telegram keeps its own ItemListControllers alive when the user returns
+    // to a parent screen. Their text is often cached, so the intro string
+    // is NOT constructed again. Recover from the controller marker instead.
+    NSString *name = NSStringFromClass(vc.class);
+    BOOL knownVoid = objc_getAssociatedObject(vc, &AGRootMarker) != nil ||
+                     objc_getAssociatedObject(vc, &AGChildMarker) != nil;
+    if (knownVoid) {
+        atomic_store(&AGPendingAyuRoot, false);
+        atomic_store(&AGInVoidStack, true);
+    } else if (AGIsStockTelegramPage(vc)) {
         atomic_store(&AGInVoidStack, false);
         atomic_store(&AGPendingAyuRoot, false);
-    } else if (objc_getAssociatedObject(vc, &AGRootMarker)) {
-        atomic_store(&AGInVoidStack, true);
+    } else if (atomic_load(&AGInVoidStack) &&
+               [name rangeOfString:@"ItemListController"].location != NSNotFound) {
+        // Tag every nested page individually. Reopening it restores scope
+        // even after switching briefly to other Telegram screens.
+        objc_setAssociatedObject(vc, &AGChildMarker, @YES,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     if (origAyuViewWillAppear)
         ((void (*)(id, SEL, BOOL))origAyuViewWillAppear)(vc, sel, animated);
@@ -697,12 +714,24 @@ static void AGAyuViewDidAppear(UIViewController *vc, SEL sel, BOOL animated) {
     }
     // Keep the scope from the marked root into EVERY nested ItemList page,
     // even when UIKit's navigationController is nil (Telegram custom stack).
-    if (AGControllerIsWithinMarkedRoot(vc) || atomic_load(&AGInVoidStack)) {
+    BOOL isScoped = AGControllerIsWithinMarkedRoot(vc) ||
+                    objc_getAssociatedObject(vc, &AGChildMarker) != nil ||
+                    atomic_load(&AGInVoidStack);
+    if (isScoped) {
         atomic_store(&AGInVoidStack, true);
+        // This ItemListController may be re-presented without rebuilding
+        // the unique VoidGram intro or its previous strings.
+        if ([name rangeOfString:@"ItemListController"].location != NSNotFound &&
+            !objc_getAssociatedObject(vc, &AGRootMarker)) {
+            objc_setAssociatedObject(vc, &AGChildMarker, @YES,
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
         __weak UIViewController *weakVC = vc;
         dispatch_async(dispatch_get_main_queue(), ^{
             UIViewController *page = weakVC;
-            if (page) AGRefreshAyuPage(page);
+            if (page && (objc_getAssociatedObject(page, &AGRootMarker) ||
+                         objc_getAssociatedObject(page, &AGChildMarker)))
+                AGRefreshAyuPage(page);
         });
     }
 }
