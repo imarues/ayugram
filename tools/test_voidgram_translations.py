@@ -28,6 +28,14 @@ required = (
     "VoidGram settings, plugins and saved deleted/edited messages in one file (AES-GCM). Save it to Files or iCloud Drive. Import from a computer: ayugram.db from the AyuGram Desktop data folder.",
     "The player menu (⋯ next to the lyrics) also has a sleep timer and the equalizer.",
     "No plugins found.\n\nTap + to install a .iosplug, .plugin or .js code plugin, or open the catalog (the bag icon).",
+    # Exact labels left untranslated in user's screenshots, including cached pages.
+    "Reset Settings", "Delete Account", "Wait at most", "Reset sources",
+    "LOOKUP", "Karaoke", "No animation", "Wave", "Glow", "Cascade",
+    "Highlight the current line without motion",
+    "Smooth word fill without moving letters",
+    "Letters rise in a wave as words are sung",
+    "Soft light follows the sung words",
+    "Spring scrolling with blurred surrounding lines",
 )
 missing = [key for key in required if key not in translations]
 if missing:
@@ -66,7 +74,13 @@ for forbidden in (
         raise SystemExit(f"Unsafe attributed-copy hook reintroduced: {forbidden}")
 for required_source in (
     "static _Thread_local BOOL agInsideTextConversion",
-    "if (objc_getAssociatedObject(vc, &AGRootMarker)) {",
+    "static char AGChildMarker;",
+    "BOOL knownVoid = objc_getAssociatedObject(vc, &AGRootMarker) != nil ||",
+    "objc_getAssociatedObject(vc, &AGChildMarker) != nil;",
+    "objc_setAssociatedObject(vc, &AGChildMarker, @YES,",
+    "if (objc_getAssociatedObject(vc, &AGRootMarker) ||",
+    "AGNormalizedMap()[AGNormalizedUILabel(text)]",
+    "NSUInteger remaining = 650;",
     "if (atomic_load(&AGInVoidStack)) return YES;",
 ):
     if required_source not in source:
