@@ -65,11 +65,14 @@ static UIViewController *AGVisibleController(UIViewController *controller, NSUIn
 }
 
 static BOOL AGIsOnAyuPage(void) {
+    // Telegram TextNode creates some long footers on a background queue.
+    // Once the UNIQUE VoidGram root is known, the scoped atomic session may
+    // safely translate exact dictionary keys off-main too; never inspect UIKit
+    // from a background queue.
+    if (atomic_load(&AGInVoidStack)) return YES;
     if (![NSThread isMainThread]) return NO;
-    // The active settings session must survive custom Telegram navigation,
-    // including early construction of nested screens and their alert content.
-    // viewWillAppear/viewDidAppear below stop it when leaving VoidGram.
-    if (atomic_load(&AGPendingAyuRoot) || atomic_load(&AGInVoidStack)) return YES;
+    // Used only during first appearance of the unique VoidGram root.
+    if (atomic_load(&AGPendingAyuRoot)) return YES;
     for (UIWindow *window in UIApplication.sharedApplication.windows) {
         if (window.hidden || window.alpha < 0.01 || !window.rootViewController) continue;
         UIViewController *active = AGVisibleController(window.rootViewController, 0);
