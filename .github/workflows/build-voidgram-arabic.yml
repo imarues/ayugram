@@ -8,6 +8,7 @@ on:
       - 'locales/voidgram-extra.json'
       - 'locales/ar-*.json'
       - 'tools/build_voidgram_translations.py'
+      - 'tools/test_voidgram_translations.py'
       - 'tools/audit_voidgram_ipa.py'
       - '.github/workflows/build-voidgram-arabic.yml'
   workflow_dispatch:
