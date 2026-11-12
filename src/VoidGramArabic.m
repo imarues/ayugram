@@ -274,24 +274,39 @@ static NSString *AGTranslate(NSString *text) {
     return [NSString stringWithFormat:@"%@%@%@", prefix, found, suffix];
 }
 
+// Every Swift/Telegram text node may create multiple intermediate attributed
+// strings. Translating inside an attributed-string copy constructor and then
+// cloning again used to recursively revisit this hot path. Guard the whole
+// conversion, not only initWithAttributedString:.
+static _Thread_local BOOL agInsideTextConversion = NO;
 static NSAttributedString *AGTranslateAttributed(NSAttributedString *original) {
-    if (![original isKindOfClass:NSAttributedString.class] || !original.length) return original;
-    NSString *replacement = AGTranslate(original.string);
-    if (!replacement || [replacement isEqualToString:original.string]) return original;
-    NSMutableAttributedString *modified = [original mutableCopy];
-    [modified replaceCharactersInRange:NSMakeRange(0, modified.length) withString:replacement];
-    // Keep original font, color and other visual attributes, including emoji styles.
-    // Direction is attached only to strings actually translated by this tweak.
-    if (modified.length) {
-        NSMutableParagraphStyle *style = [[modified attribute:NSParagraphStyleAttributeName
-            atIndex:0 effectiveRange:NULL] mutableCopy];
-        if (!style) style = [[NSMutableParagraphStyle alloc] init];
-        style.baseWritingDirection = NSWritingDirectionRightToLeft;
-        style.alignment = NSTextAlignmentNatural;
-        [modified addAttribute:NSParagraphStyleAttributeName value:style
-                        range:NSMakeRange(0, modified.length)];
+    if (![original isKindOfClass:NSAttributedString.class] ||
+        !original.length || original.length > 5000 || agInsideTextConversion ||
+        !AGArabicEnabled() || !AGIsOnAyuPage()) return original;
+    agInsideTextConversion = YES;
+    NSAttributedString *result = original;
+    @try {
+        NSString *plain = original.string;
+        NSString *replacement = AGTranslate(plain);
+        if (replacement.length && ![replacement isEqualToString:plain]) {
+            // Only create the mutable copy if an exact UI translation exists.
+            // Avoid touching user-editable text or continuously rebuilding nodes.
+            NSMutableAttributedString *modified = [original mutableCopy];
+            [modified replaceCharactersInRange:NSMakeRange(0, modified.length)
+                                    withString:replacement];
+            NSMutableParagraphStyle *style = [[modified attribute:NSParagraphStyleAttributeName
+                atIndex:0 effectiveRange:NULL] mutableCopy];
+            if (!style) style = [[NSMutableParagraphStyle alloc] init];
+            style.baseWritingDirection = NSWritingDirectionRightToLeft;
+            style.alignment = NSTextAlignmentNatural;
+            [modified addAttribute:NSParagraphStyleAttributeName value:style
+                            range:NSMakeRange(0, modified.length)];
+            result = modified;
+        }
+    } @finally {
+        agInsideTextConversion = NO;
     }
-    return modified;
+    return result;
 }
 
 #define AG_CALL_VOID3(ORIG, OBJ, CMD, ARG) \
@@ -471,15 +486,15 @@ static void AGHookAttributedClusters(void) {
                    (IMP)AGConcreteImmutablePlain, &originalConcreteImmutablePlain);
     AGHookConcrete(immutableClass, @selector(initWithString:attributes:),
                    (IMP)AGConcreteImmutableAttrs, &originalConcreteImmutableAttrs);
-    AGHookConcrete(immutableClass, @selector(initWithAttributedString:),
-                   (IMP)AGConcreteImmutableCopy, &originalConcreteImmutableCopy);
+    // Deliberately do not swizzle initWithAttributedString: here. The copy
+    // constructor is used heavily by interactive gesture previews, and
+    // translating it triggers recursive layout/copy storms.
     if (mutableClass != immutableClass) {
         AGHookConcrete(mutableClass, @selector(initWithString:),
                        (IMP)AGConcreteMutablePlain, &originalConcreteMutablePlain);
         AGHookConcrete(mutableClass, @selector(initWithString:attributes:),
                        (IMP)AGConcreteMutableAttrs, &originalConcreteMutableAttrs);
-        AGHookConcrete(mutableClass, @selector(initWithAttributedString:),
-                       (IMP)AGConcreteMutableCopy, &originalConcreteMutableCopy);
+        // Keep the native mutable-copy initializer untouched as well.
     }
 }
 
@@ -622,7 +637,14 @@ static void AGRefreshAyuPage(UIViewController *vc) {
         [name rangeOfString:@"Ayu" options:NSCaseInsensitiveSearch].location == NSNotFound) return;
     NSString *translated = AGTranslate(vc.title);
     if (vc.title.length && ![translated isEqualToString:vc.title]) vc.title = translated;
-    AGRefreshSettingsView(vc.view, 0);
+    // Nested pages are built while the translation session is active; hooks
+    // already translate their labels on creation. Traversing all subviews
+    // again on each appearance can lock up gesture-heavy ItemList screens.
+    // Only the root needs a one-time catch-up pass because it was constructed
+    // before we detected the unique VoidGram intro text.
+    if (objc_getAssociatedObject(vc, &AGRootMarker)) {
+        AGRefreshSettingsView(vc.view, 0);
+    }
 }
 // A stock Telegram screen always closes translation scope. The root can be
 // reopened later by its unique intro text. Generic ItemListController pages
