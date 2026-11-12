@@ -85,6 +85,21 @@ for required_source in (
 ):
     if required_source not in source:
         raise SystemExit(f"Missing anti-freeze or async-text guard: {required_source}")
+# Root-only footer visibility. Upper feature rows remain clickable; only the
+# standalone LINKS and following acknowledgements should be suppressed.
+for required_source in (
+    "static void AGHideLinksAndCreditsOnRoot(UIViewController *root)",
+    "AGForegroundVoidController != root",
+    "objc_getAssociatedObject(root, &AGRootMarker)",
+    '@"links", @"الروابط", @"acknowledgments"',
+    '@"credits", @"thanks", @"thanks & credits", @"شكر وتقدير"',
+    "item.userInteractionEnabled = NO;",
+    "item.hidden = YES;",
+    "AGForegroundVoidController = vc;",
+    "AGMonitorRootFooter(vc);",
+):
+    if required_source not in source:
+        raise SystemExit(f"VoidGram root footer suppression guard is missing: {required_source}")
 if "AGInAyuStack" in source:
     raise SystemExit("Old sticky global scope remains")
 header = ROOT / "src" / "generated_voidgram_ar.h"
