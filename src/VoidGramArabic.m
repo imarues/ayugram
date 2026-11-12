@@ -94,7 +94,7 @@ static NSString *AGTranslateNumericSummary(NSString *text) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         rulesPattern = [NSRegularExpression regularExpressionWithPattern:
-            @"^RULES\s*[·•]\s*([0-9]+)\s+OF\s+([0-9]+)$"
+            @"^RULES\\s*[·•]\\s*([0-9]+)\\s+OF\\s+([0-9]+)$"
             options:NSRegularExpressionCaseInsensitive error:NULL];
         countPattern = [NSRegularExpression regularExpressionWithPattern:@"^([0-9]+) of ([0-9]+)$"
             options:0 error:NULL];
