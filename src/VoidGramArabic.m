@@ -98,6 +98,39 @@ static NSString *AGCanonicalText(NSString *text) {
     value = [value stringByReplacingOccurrencesOfString:@"\u201d" withString:@"\""];
     return value;
 }
+// Swift settings can join multi-line footers or introduce NBSP/line breaks
+// after the localization key was written. Build a second exact map with
+// normalized whitespace, instead of replacing arbitrary substrings.
+static NSString *AGNormalizedUILabel(NSString *source) {
+    if (!source.length) return source;
+    NSString *canonical = AGCanonicalText(source);
+    NSArray<NSString *> *components =
+        [canonical componentsSeparatedByCharactersInSet:
+         [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSMutableArray<NSString *> *words = [NSMutableArray arrayWithCapacity:components.count];
+    for (NSString *part in components) if (part.length) [words addObject:part];
+    return [words componentsJoinedByString:@" "];
+}
+static NSDictionary<NSString *, NSString *> *AGNormalizedMap(void) {
+    static NSDictionary *map;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSMutableDictionary *entries = [NSMutableDictionary dictionary];
+        NSMutableSet *conflicts = [NSMutableSet set];
+        [AGMap() enumerateKeysAndObjectsUsingBlock:^(NSString *key, NSString *translation, BOOL *stop) {
+            NSString *normalized = AGNormalizedUILabel(key);
+            if (!normalized.length) return;
+            NSString *previous = entries[normalized];
+            if (previous && ![previous isEqualToString:translation]) {
+                [conflicts addObject:normalized];
+            } else if (!previous) entries[normalized] = translation;
+        }];
+        for (NSString *key in conflicts) [entries removeObjectForKey:key];
+        map = [entries copy];
+    });
+    return map;
+}
+
 static NSString *AGTranslateNumericSummary(NSString *text) {
     if (!AGIsOnAyuPage()) return nil;
     static NSRegularExpression *countPattern, *secondsPattern;
@@ -184,6 +217,7 @@ static NSString *AGTranslate(NSString *text) {
     if (!AGIsOnAyuPage()) return text; // exact mapping is never global
     NSString *found = AGMap()[text];
     if (!found) found = AGMap()[AGCanonicalText(text)];
+    if (!found) found = AGNormalizedMap()[AGNormalizedUILabel(text)];
     if (found.length) return found;
     NSString *numeric = AGTranslateNumericSummary(text);
     if (numeric) return numeric;
@@ -270,6 +304,7 @@ static NSString *AGTranslate(NSString *text) {
     if (!trimmed.length || [trimmed isEqualToString:text]) return text;
     found = AGMap()[trimmed];
     if (!found) found = AGMap()[AGCanonicalText(trimmed)];
+    if (!found) found = AGNormalizedMap()[AGNormalizedUILabel(trimmed)];
     if (!found.length) return text;
     NSRange range = [text rangeOfString:trimmed];
     if (range.location == NSNotFound) return text;
@@ -601,8 +636,9 @@ static BOOL AGControllerIsWithinMarkedRoot(UIViewController *vc) {
     }
     return NO;
 }
-static void AGRefreshSettingsView(UIView *view, NSUInteger depth) {
-    if (!view || depth > 25 || view.hidden) return;
+static void AGRefreshSettingsView(UIView *view, NSUInteger depth, NSUInteger *remaining) {
+    if (!view || depth > 20 || view.hidden || !remaining || *remaining == 0) return;
+    --(*remaining);
     if ([view isKindOfClass:UILabel.class]) {
         UILabel *label = (UILabel *)view;
         if (label.attributedText.length) {
@@ -632,7 +668,10 @@ static void AGRefreshSettingsView(UIView *view, NSUInteger depth) {
             if (![translated isEqualToString:field.text]) field.text = translated;
         }
     }
-    for (UIView *child in view.subviews) AGRefreshSettingsView(child, depth + 1);
+    for (UIView *child in view.subviews) {
+        if (*remaining == 0) break;
+        AGRefreshSettingsView(child, depth + 1, remaining);
+    }
 }
 static void AGRefreshAyuPage(UIViewController *vc) {
     if (!vc || !vc.isViewLoaded || !AGIsOnAyuPage()) return;
@@ -652,7 +691,8 @@ static void AGRefreshAyuPage(UIViewController *vc) {
         // Revisit cached text exactly once per appearance, not during every
         // layout pass. This restores labels retained in English while the
         // scope had temporarily been inactive.
-        AGRefreshSettingsView(vc.view, 0);
+        NSUInteger remaining = 650; // cap cache-recovery work on gesture-heavy settings pages
+        AGRefreshSettingsView(vc.view, 0, &remaining);
     }
 }
 // A stock Telegram screen always closes translation scope. The root can be
