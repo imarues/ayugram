@@ -9,9 +9,15 @@ build remain unchanged.
 
 ## Scope
 
-- Arabic translation is enabled only while the unique VoidGram Settings
-  root is opening, or the marked root is still in the current visible
-  navigation stack (nested screens, plugin settings, alerts).
+- Arabic translation starts only from VoidGram's unique settings intro
+  sentence. Once the root appears, a settings-session flag follows Telegram's
+  custom navigation controller across nested ItemList screens (Appearance,
+  Messages, Chat list, filters and deeper pages). The regular UIKit
+  navigationController property is insufficient for this custom stack.
+- The session stops immediately when a stock Telegram screen appears
+  (Settings, Chats, Contacts, Calls, user profiles). The guarded dictionary
+  cannot translate ordinary chat content outside VoidGram settings.
+- Back-navigation restores the session when the actual marked root appears.
 - The unique exteraGram intro sentence is used as a root-detection anchor.
   Generic words like Privacy, Messages, Ghost Mode by chat and generic
   ItemListController classes are not valid anchors.
