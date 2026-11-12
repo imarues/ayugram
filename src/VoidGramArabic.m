@@ -1,8 +1,9 @@
-// VoidGramArabic — localizes existing UI strings only; it does not modify Telegram account state.
+// VoidGramArabic — root settings UI localization + root-only links/credits visibility; no account state changes.
 // iOS 15+ / arm64; built with Apple iOS SDK on macOS.
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 #import <dispatch/dispatch.h>
 #import <stdatomic.h>
 #import "generated_voidgram_ar.h"
@@ -718,6 +719,181 @@ static BOOL AGIsStockTelegramPage(UIViewController *vc) {
     return NO;
 }
 
+// ROOT-ONLY VISUAL FILTER
+// The upstream VoidGram root renders LINKS and credits as independent Swift
+// ItemList sections. No internal Telegram model, account preference, link or
+// action is changed. Their item views are hidden and cannot receive touches.
+// This must never run on category pages (Privacy, More, Tools, etc).
+static __weak UIViewController *AGForegroundVoidController;
+static NSTimer *AGRootFooterTimer;
+static char AGHiddenFooterMarker;
+static char AGPreviousFooterTouch;
+
+static id AGCallObjectGetter(id obj, NSString *selector) {
+    if (!obj) return nil;
+    SEL sel = NSSelectorFromString(selector);
+    if (![obj respondsToSelector:sel]) return nil;
+    return ((id (*)(id, SEL))objc_msgSend)(obj, sel);
+}
+
+static NSString *AGVisibleTextFromObject(id obj) {
+    id value = AGCallObjectGetter(obj, @"attributedText");
+    if ([value isKindOfClass:NSAttributedString.class]) return [value string];
+    value = AGCallObjectGetter(obj, @"text");
+    if ([value isKindOfClass:NSString.class]) return value;
+    if ([obj isKindOfClass:UILabel.class]) return ((UILabel *)obj).text;
+    return nil;
+}
+
+static BOOL AGIsRootFooterText(NSString *value) {
+    if (!value.length || value.length > 120) return NO;
+    NSString *label = [[AGNormalizedUILabel(value)
+                        stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet]
+                        lowercaseString];
+    if (!label.length) return NO;
+    static NSSet<NSString *> *removedLabels;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        removedLabels = [NSSet setWithArray:@[
+            // Everything starting at LINKS, including the following credits.
+            @"links", @"الروابط", @"acknowledgments", @"acknowledgements",
+            @"credits", @"thanks", @"thanks & credits", @"شكر وتقدير",
+            @"شكر وتقدير:", @"شكر وتقدير :", @"спасибо", @"ссылки",
+            @"channel", @"القناة", @"source code", @"الرمز المصدري",
+            @"official group", @"المجموعة الرسمية",
+            @"repository owner", @"مالك المستودع",
+            @"github", @"تليجرام", @"telegram",
+            @"@neosay", @"@neosay1337", @"murk-sus",
+            @"@asuka4scape_developer", @"neistv", @"@neistv",
+            @"@murk-sus", @"@jailbreak_iphone", @"@jailbreak_iph"
+        ]];
+    });
+    if ([removedLabels containsObject:label]) return YES;
+    // Lower links/credits rows can show shortened handles or a full URI.
+    if ([label hasPrefix:@"@neosay"] ||
+        [label hasPrefix:@"@asuka4scape_"] ||
+        [label hasPrefix:@"@jailbreak_iph"]) return YES;
+    return NO;
+}
+
+static BOOL AGNodeContainsFooterText(id node, NSUInteger depth, NSUInteger *remaining) {
+    if (!node || depth > 8 || !remaining || *remaining == 0) return NO;
+    --(*remaining);
+    if (AGIsRootFooterText(AGVisibleTextFromObject(node))) return YES;
+    id children = AGCallObjectGetter(node, @"subnodes");
+    if (![children isKindOfClass:NSArray.class]) return NO;
+    for (id child in (NSArray *)children) {
+        if (AGNodeContainsFooterText(child, depth + 1, remaining)) return YES;
+    }
+    return NO;
+}
+
+static id AGNodeForView(UIView *view) {
+    return AGCallObjectGetter(view, @"asyncdisplaykit_node");
+}
+
+static UIView *AGFooterRowForTextView(UIView *textView, UIView *rootView) {
+    UIView *candidate = nil;
+    CGFloat width = CGRectGetWidth(rootView.bounds);
+    for (UIView *v = textView; v && v != rootView; v = v.superview) {
+        CGRect rect = [v convertRect:v.bounds toView:rootView];
+        // ItemList cells are full-width rows. Never hide a whole group
+        // containing upper feature entries or the navigation container.
+        if (CGRectGetWidth(rect) >= width * 0.65 &&
+            CGRectGetHeight(rect) >= 22 &&
+            CGRectGetHeight(rect) <= 170) {
+            candidate = v;
+        }
+    }
+    return candidate;
+}
+
+static void AGCollectFooterRows(UIView *view, UIView *rootView,
+                                NSMutableSet<UIView *> *hideRows,
+                                NSMutableSet<UIView *> *oldHidden,
+                                NSUInteger depth, NSUInteger *remaining) {
+    if (!view || depth > 32 || !remaining || *remaining == 0) return;
+    --(*remaining);
+    if (objc_getAssociatedObject(view, &AGHiddenFooterMarker)) {
+        [oldHidden addObject:view];
+    }
+    id node = AGNodeForView(view);
+    if (node) {
+        NSString *name = NSStringFromClass([node class]);
+        // Prefer the actual ListView item node. This removes the icon, row
+        // arrow, text, accessibility and tap surface together.
+        if ([name containsString:@"ItemNode"] &&
+            ([name containsString:@"ItemList"] || [name containsString:@"Ayu"])) {
+            NSUInteger nodeLimit = 180;
+            if (AGNodeContainsFooterText(node, 0, &nodeLimit)) {
+                [hideRows addObject:view];
+                return;
+            }
+        }
+    }
+    // Fallback for UILabel-backed variants of SettingsUI.
+    if (AGIsRootFooterText(AGVisibleTextFromObject(view))) {
+        UIView *item = AGFooterRowForTextView(view, rootView);
+        if (item) [hideRows addObject:item];
+    }
+    for (UIView *child in view.subviews) {
+        if (*remaining == 0) break;
+        AGCollectFooterRows(child, rootView, hideRows, oldHidden,
+                            depth + 1, remaining);
+    }
+}
+
+static void AGHideLinksAndCreditsOnRoot(UIViewController *root) {
+    if (!root || AGForegroundVoidController != root ||
+        !objc_getAssociatedObject(root, &AGRootMarker) || !root.isViewLoaded ||
+        !root.view.window) return;
+    NSMutableSet<UIView *> *toHide = [NSMutableSet set];
+    NSMutableSet<UIView *> *previous = [NSMutableSet set];
+    NSUInteger remaining = 1500; // bounded and root-only: no app-wide polling
+    AGCollectFooterRows(root.view, root.view, toHide, previous, 0, &remaining);
+    for (UIView *item in previous) {
+        if ([toHide containsObject:item]) continue;
+        // ItemList may recycle a view for a feature row while scrolling.
+        item.hidden = NO;
+        NSNumber *touch = objc_getAssociatedObject(item, &AGPreviousFooterTouch);
+        if (touch) item.userInteractionEnabled = touch.boolValue;
+        objc_setAssociatedObject(item, &AGHiddenFooterMarker, nil,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(item, &AGPreviousFooterTouch, nil,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    for (UIView *item in toHide) {
+        if (!objc_getAssociatedObject(item, &AGHiddenFooterMarker)) {
+            objc_setAssociatedObject(item, &AGPreviousFooterTouch,
+                                     @(item.userInteractionEnabled),
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        objc_setAssociatedObject(item, &AGHiddenFooterMarker, @YES,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        item.userInteractionEnabled = NO;
+        item.hidden = YES;
+        item.accessibilityElementsHidden = YES;
+    }
+}
+
+static void AGMonitorRootFooter(UIViewController *root) {
+    [AGRootFooterTimer invalidate];
+    AGRootFooterTimer = nil;
+    __weak UIViewController *weakRoot = root;
+    AGRootFooterTimer = [NSTimer scheduledTimerWithTimeInterval:0.16 repeats:YES
+        block:^(NSTimer *timer) {
+            UIViewController *page = weakRoot;
+            if (!page) {
+                [timer invalidate];
+                return;
+            }
+            if (AGForegroundVoidController != page) return;
+            AGHideLinksAndCreditsOnRoot(page);
+        }];
+    // Hide immediately on root appearance, not only after a scroll tick.
+    AGHideLinksAndCreditsOnRoot(root);
+}
+
 static IMP origAyuViewWillAppear = NULL;
 static void AGAyuViewWillAppear(UIViewController *vc, SEL sel, BOOL animated) {
     // Telegram keeps its own ItemListControllers alive when the user returns
@@ -748,6 +924,7 @@ static void AGAyuViewDidAppear(UIViewController *vc, SEL sel, BOOL animated) {
         ((void (*)(id, SEL, BOOL))origAyuViewDidAppear)(vc, sel, animated);
     NSString *name = NSStringFromClass(vc.class);
     if (AGIsStockTelegramPage(vc)) {
+        AGForegroundVoidController = nil;
         atomic_store(&AGInVoidStack, false);
         atomic_store(&AGPendingAyuRoot, false);
         return;
@@ -767,6 +944,10 @@ static void AGAyuViewDidAppear(UIViewController *vc, SEL sel, BOOL animated) {
                     atomic_load(&AGInVoidStack);
     if (isScoped) {
         atomic_store(&AGInVoidStack, true);
+        AGForegroundVoidController = vc;
+        if (objc_getAssociatedObject(vc, &AGRootMarker)) {
+            AGMonitorRootFooter(vc);
+        }
         // This ItemListController may be re-presented without rebuilding
         // the unique VoidGram intro or its previous strings.
         if ([name rangeOfString:@"ItemListController"].location != NSNotFound &&
