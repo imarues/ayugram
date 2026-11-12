@@ -1,0 +1,46 @@
+name: Build VoidGram Arabic dylib
+
+on:
+  push:
+    branches: [voidgram-arabic]
+    paths:
+      - 'src/VoidGramArabic.m'
+      - 'locales/voidgram-extra.json'
+      - 'locales/ar-*.json'
+      - 'tools/build_voidgram_translations.py'
+      - 'tools/audit_voidgram_ipa.py'
+      - '.github/workflows/build-voidgram-arabic.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate VoidGram-only Arabic dictionary
+        run: python3 tools/build_voidgram_translations.py
+      - name: Validate translations and scope
+        run: python3 tools/test_voidgram_translations.py
+      - name: Compile VoidGramArabic for iOS 15+ arm64
+        run: |
+          set -euo pipefail
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          mkdir -p dist
+          xcrun --sdk iphoneos clang \
+            -arch arm64 -miphoneos-version-min=15.0 \
+            -isysroot "$SDK" -fobjc-arc -fmodules -O2 \
+            -dynamiclib src/VoidGramArabic.m \
+            -framework Foundation -framework UIKit \
+            -Wl,-install_name,@rpath/VoidGramArabic.dylib \
+            -o dist/VoidGramArabic.dylib
+          file dist/VoidGramArabic.dylib
+          shasum -a 256 dist/VoidGramArabic.dylib > dist/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VoidGramArabic-27.6.9-iOS15-arm64
+          path: dist/
+          if-no-files-found: error
