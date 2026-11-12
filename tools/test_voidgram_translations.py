@@ -16,6 +16,12 @@ required = (
     "Hide matching messages", "Private chats and groups", "Ignore case",
     "Add Rule", "VoidGram settings", "Face ID for VoidGram settings",
     "Could not start the Python plugin.", "Could not start the WebAssembly plugin.",
+    # The user-reported failure was not missing keys; it was an inactive
+    # translation context on Telegram's custom nested ItemListController stack.
+    "Chat list", "Panels", "Navigation and composer", "Glass and bubbles",
+    "Themes, colours & badges", "No story camera on pull", "Square avatars",
+    "OLED mode", "Sticker size", "INTERFACE", "Beside the time",
+    "Pulling the chat list does not open the camera",
 )
 missing = [key for key in required if key not in translations]
 if missing:
@@ -35,6 +41,11 @@ for gate in (
     '@"Just an exteraGram based client with ToS breaking features in mind."',
     'AGControllerIsWithinMarkedRoot',
     'atomic_store(&AGPendingAyuRoot, false);',
+    'atomic_bool AGInVoidStack',
+    'atomic_store(&AGInVoidStack, true);',
+    'atomic_store(&AGInVoidStack, false);',
+    '@selector(viewWillAppear:)',
+    'AGRefreshAyuPage(page)',
 ):
     if gate not in source:
         raise SystemExit(f"Missing scope guard: {gate}")
@@ -43,4 +54,4 @@ if "AGInAyuStack" in source:
 header = ROOT / "src" / "generated_voidgram_ar.h"
 if not header.is_file():
     raise SystemExit("Generated translation header missing; run build script first")
-print(f"PASS: {len(translations)} VoidGram translation keys, strict root guard, iOS source present")
+print(f"PASS: {len(translations)} VoidGram translation keys, nested page scope + exit guard, iOS source present")
