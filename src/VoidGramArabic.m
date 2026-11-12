@@ -133,7 +133,7 @@ static NSDictionary<NSString *, NSString *> *AGNormalizedMap(void) {
 
 static NSString *AGTranslateNumericSummary(NSString *text) {
     if (!AGIsOnAyuPage()) return nil;
-    static NSRegularExpression *countPattern, *secondsPattern;
+    static NSRegularExpression *countPattern, *secondsPattern, *shortSecondsPattern;
     static NSRegularExpression *archivePattern, *fileCountPattern, *capacityPattern, *rulesPattern;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
@@ -143,6 +143,8 @@ static NSString *AGTranslateNumericSummary(NSString *text) {
         countPattern = [NSRegularExpression regularExpressionWithPattern:@"^([0-9]+) of ([0-9]+)$"
             options:0 error:NULL];
         secondsPattern = [NSRegularExpression regularExpressionWithPattern:@"^([0-9]+) (seconds?|minutes?)$"
+            options:NSRegularExpressionCaseInsensitive error:NULL];
+        shortSecondsPattern = [NSRegularExpression regularExpressionWithPattern:@"^([0-9]+)\\s+s$"
             options:NSRegularExpressionCaseInsensitive error:NULL];
         // The media archive mixes an English count and English "of" with
         // the device-localized size, e.g. "0 files · 0 KB · of 250 MB".
@@ -202,6 +204,11 @@ static NSString *AGTranslateNumericSummary(NSString *text) {
         NSString *unit = [text substringWithRange:[m rangeAtIndex:2]];
         return [NSString stringWithFormat:@"%@ %@", a,
             [[unit lowercaseString] hasPrefix:@"second"] ? @"ثانية" : @"دقيقة"];
+    }
+    m = [shortSecondsPattern firstMatchInString:text options:0 range:NSMakeRange(0,text.length)];
+    if (m && m.range.length == text.length) {
+        NSString *value = [text substringWithRange:[m rangeAtIndex:1]];
+        return [NSString stringWithFormat:@"%@ ثانية", value];
     }
     return nil;
 }
