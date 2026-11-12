@@ -97,6 +97,15 @@ for required_source in (
     "item.hidden = YES;",
     "AGForegroundVoidController = vc;",
     "AGMonitorRootFooter(vc);",
+    "AGCaptureFooterHeader(obj, value.string);",
+    "AGKeepFooterOutsideViewport(root)",
+    "AGApplyFooterCover(root)",
+    "AGLinksHeaderObject",
+    "AGFooterHeaderViewIn",
+    "static BOOL AGIsLinksHeaderText(NSString *value)",
+    "AGForegroundVoidController = vc;",
+    "if (objc_getAssociatedObject(vc, &AGRootMarker)) {",
+    "AGForegroundVoidController != root",
 ):
     if required_source not in source:
         raise SystemExit(f"VoidGram root footer suppression guard is missing: {required_source}")
