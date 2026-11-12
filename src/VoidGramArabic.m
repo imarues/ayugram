@@ -66,6 +66,12 @@ static BOOL AGIsOnAyuPage(void) {
     for (UIWindow *window in UIApplication.sharedApplication.windows) {
         if (window.hidden || window.alpha < 0.01 || !window.rootViewController) continue;
         UIViewController *active = AGVisibleController(window.rootViewController, 0);
+        NSString *activeClass = active ? NSStringFromClass(active.class) : @"";
+        // Chat and account pages must never inherit VoidGram's dictionary.
+        if ([activeClass rangeOfString:@"ChatController"].location != NSNotFound ||
+            [activeClass rangeOfString:@"ChatListController"].location != NSNotFound ||
+            [activeClass rangeOfString:@"AccountController"].location != NSNotFound ||
+            [activeClass rangeOfString:@"PeerInfoController"].location != NSNotFound) continue;
         if (AGControllerIsWithinMarkedRoot(active)) return YES;
     }
     return NO;
@@ -84,9 +90,12 @@ static NSString *AGCanonicalText(NSString *text) {
 static NSString *AGTranslateNumericSummary(NSString *text) {
     if (!AGIsOnAyuPage()) return nil;
     static NSRegularExpression *countPattern, *secondsPattern;
-    static NSRegularExpression *archivePattern, *fileCountPattern, *capacityPattern;
+    static NSRegularExpression *archivePattern, *fileCountPattern, *capacityPattern, *rulesPattern;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
+        rulesPattern = [NSRegularExpression regularExpressionWithPattern:
+            @"^RULES\s*[·•]\s*([0-9]+)\s+OF\s+([0-9]+)$"
+            options:NSRegularExpressionCaseInsensitive error:NULL];
         countPattern = [NSRegularExpression regularExpressionWithPattern:@"^([0-9]+) of ([0-9]+)$"
             options:0 error:NULL];
         secondsPattern = [NSRegularExpression regularExpressionWithPattern:@"^([0-9]+) (seconds?|minutes?)$"
@@ -104,6 +113,13 @@ static NSString *AGTranslateNumericSummary(NSString *text) {
             @"^of\\s+([0-9]+)\\s+(MB|GB)$"
             options:NSRegularExpressionCaseInsensitive error:NULL];
     });
+    NSTextCheckingResult *ruleMatch = [rulesPattern firstMatchInString:text options:0
+        range:NSMakeRange(0, text.length)];
+    if (ruleMatch && ruleMatch.range.length == text.length) {
+        NSString *a = [text substringWithRange:[ruleMatch rangeAtIndex:1]];
+        NSString *b = [text substringWithRange:[ruleMatch rangeAtIndex:2]];
+        return [NSString stringWithFormat:@"القواعد · %@ من %@", a, b];
+    }
     NSTextCheckingResult *m = [archivePattern firstMatchInString:text options:0
         range:NSMakeRange(0, text.length)];
     if (m && m.range.length == text.length) {
@@ -176,6 +192,27 @@ static NSString *AGTranslate(NSString *text) {
             if (!candidate) candidate = AGMap()[AGCanonicalText(suffix)];
             if (candidate.length) {
                 return [[text substringToIndex:prefixEnd] stringByAppendingString:candidate];
+            }
+        }
+    }
+
+    // Translate a known label with a trailing emoji or decorative bullet.
+    // Preserve the suffix's exact composed characters (including ZWJ emoji).
+    if (text.length > 2) {
+        NSUInteger suffixStart = text.length;
+        while (suffixStart > 0 && text.length - suffixStart <= 16) {
+            NSRange cluster = [text rangeOfComposedCharacterSequenceAtIndex:suffixStart - 1];
+            NSString *glyph = [text substringWithRange:cluster];
+            unichar ch = [glyph characterAtIndex:0];
+            if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+                (ch >= '0' && ch <= '9')) break;
+            suffixStart = cluster.location;
+        }
+        if (suffixStart < text.length && suffixStart > 0) {
+            NSString *prefix = [text substringToIndex:suffixStart];
+            NSString *mapped = AGMap()[prefix];
+            if (mapped.length) {
+                return [mapped stringByAppendingString:[text substringFromIndex:suffixStart]];
             }
         }
     }
