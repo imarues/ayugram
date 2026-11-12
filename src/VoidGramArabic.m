@@ -555,7 +555,7 @@ static void AGRefreshSettingsView(UIView *view, NSUInteger depth) {
         if (field.placeholder.length && ![translated isEqualToString:field.placeholder]) field.placeholder = translated;
     } else if ([view isKindOfClass:UITextView.class]) {
         UITextView *field = (UITextView *)view;
-        if (!field.editing && field.text.length) {
+        if (!field.isFirstResponder && field.text.length) {
             NSString *translated = AGTranslate(field.text);
             if (![translated isEqualToString:field.text]) field.text = translated;
         }
