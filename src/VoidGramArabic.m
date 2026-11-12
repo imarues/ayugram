@@ -300,7 +300,7 @@ static void AGUILabelAttr(UILabel *obj, SEL cmd, NSAttributedString *value) {
 }
 static IMP origUITextViewText = NULL;
 static void AGUITextViewText(UITextView *obj, SEL cmd, NSString *value) {
-    AG_CALL_VOID3(origUITextViewText, obj, cmd, AGTranslate(value));
+    AG_CALL_VOID3(origUITextViewText, obj, cmd, obj.editable ? value : AGTranslate(value));
 }
 static IMP origUITextViewAttr = NULL;
 static void AGUITextViewAttr(UITextView *obj, SEL cmd, NSAttributedString *value) {
@@ -312,7 +312,8 @@ static void AGUITextFieldPlaceholder(UITextField *obj, SEL cmd, NSString *value)
 }
 static IMP origUITextFieldText = NULL;
 static void AGUITextFieldText(UITextField *obj, SEL cmd, NSString *value) {
-    AG_CALL_VOID3(origUITextFieldText, obj, cmd, AGTranslate(value));
+    // Never replace user-typed search terms, filter rules, or account data.
+    AG_CALL_VOID3(origUITextFieldText, obj, cmd, value);
 }
 static IMP origNavigationTitle = NULL;
 static void AGNavigationTitle(UINavigationItem *obj, SEL cmd, NSString *value) {
@@ -555,6 +556,13 @@ static void AGInstallDiagnostics(void) {
 static IMP origAyuViewDidAppear = NULL;
 static BOOL AGControllerIsWithinMarkedRoot(UIViewController *vc) {
     for (NSUInteger depth = 0; vc && depth < 20; depth++) {
+        // A modal opened from a real chat is still a chat, even if the
+        // VoidGram root happens to remain lower in the navigation stack.
+        NSString *name = NSStringFromClass(vc.class);
+        if ([name rangeOfString:@"ChatController"].location != NSNotFound ||
+            [name rangeOfString:@"ChatListController"].location != NSNotFound ||
+            [name rangeOfString:@"AccountController"].location != NSNotFound ||
+            [name rangeOfString:@"PeerInfoController"].location != NSNotFound) return NO;
         if (objc_getAssociatedObject(vc, &AGRootMarker)) return YES;
         UINavigationController *nav = vc.navigationController;
         if (nav) {
@@ -592,7 +600,7 @@ static void AGRefreshSettingsView(UIView *view, NSUInteger depth) {
         if (field.placeholder.length && ![translated isEqualToString:field.placeholder]) field.placeholder = translated;
     } else if ([view isKindOfClass:UITextView.class]) {
         UITextView *field = (UITextView *)view;
-        if (!field.isFirstResponder && field.text.length) {
+        if (!field.editable && !field.isFirstResponder && field.text.length) {
             NSString *translated = AGTranslate(field.text);
             if (![translated isEqualToString:field.text]) field.text = translated;
         }
