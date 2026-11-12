@@ -35,7 +35,7 @@ PROTECTED = ("AyuGram Desktop", "AyuGram-IOS", "AyuGramm-IOS",
              "AyuGramm-Plugins", "AyuGramm", "ayugram.db")
 
 def rename_app_brand(value: str) -> str:
-    tokens = {f"\ue{100+i:03x}": literal for i, literal in enumerate(PROTECTED)}
+    tokens = {f"__VG_PROTECTED_{i}__": literal for i, literal in enumerate(PROTECTED)}
     for token, literal in tokens.items():
         value = value.replace(literal, token)
     value = re.sub(r"(?<![A-Za-z])AyuGram(?![A-Za-z])", "VoidGram", value)
