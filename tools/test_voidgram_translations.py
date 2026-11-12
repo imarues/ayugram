@@ -22,6 +22,12 @@ required = (
     "Themes, colours & badges", "No story camera on pull", "Square avatars",
     "OLED mode", "Sticker size", "INTERFACE", "Beside the time",
     "Pulling the chat list does not open the camera",
+    # Reported untranslated labels/footers in player, Tools and camera.
+    "Link rewriting", "Starting zoom", "No live preview",
+    "Watermark text", "Track on the Lock Screen",
+    "VoidGram settings, plugins and saved deleted/edited messages in one file (AES-GCM). Save it to Files or iCloud Drive. Import from a computer: ayugram.db from the AyuGram Desktop data folder.",
+    "The player menu (⋯ next to the lyrics) also has a sleep timer and the equalizer.",
+    "No plugins found.\n\nTap + to install a .iosplug, .plugin or .js code plugin, or open the catalog (the bag icon).",
 )
 missing = [key for key in required if key not in translations]
 if missing:
@@ -49,6 +55,22 @@ for gate in (
 ):
     if gate not in source:
         raise SystemExit(f"Missing scope guard: {gate}")
+# Regression checks for menu/gesture freeze: a string clone must never
+# trigger translated copy constructors recursively. Keep the rendering hooks,
+# but don't swizzle global attributed-copy initializers.
+for forbidden in (
+    "AGHookConcrete(immutableClass, @selector(initWithAttributedString:)",
+    "AGHookConcrete(mutableClass, @selector(initWithAttributedString:)",
+):
+    if forbidden in source:
+        raise SystemExit(f"Unsafe attributed-copy hook reintroduced: {forbidden}")
+for required_source in (
+    "static _Thread_local BOOL agInsideTextConversion",
+    "if (objc_getAssociatedObject(vc, &AGRootMarker)) {",
+    "if (atomic_load(&AGInVoidStack)) return YES;",
+):
+    if required_source not in source:
+        raise SystemExit(f"Missing anti-freeze or async-text guard: {required_source}")
 if "AGInAyuStack" in source:
     raise SystemExit("Old sticky global scope remains")
 header = ROOT / "src" / "generated_voidgram_ar.h"
