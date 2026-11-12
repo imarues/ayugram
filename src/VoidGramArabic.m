@@ -22,7 +22,7 @@ static NSDictionary<NSString *, NSString *> *AGMap(void) {
 
 static BOOL AGArabicEnabled(void) {
     id preference = [[NSUserDefaults standardUserDefaults] objectForKey:@"VoidGramArabicEnabled"];
-    // The requested target is AyuGram's screens only, even if Telegram is set to English.
+    // The requested target is VoidGram's screens only, even if Telegram is set to English.
     return preference == nil || [preference boolValue];
 }
 
@@ -31,6 +31,11 @@ static BOOL AGArabicEnabled(void) {
 // The distinctive intro text creates a short-lived root-opening hint. Once the
 // page appears we mark THAT instance and follow only its current navigation stack.
 static atomic_bool AGPendingAyuRoot = ATOMIC_VAR_INIT(false);
+// Telegram uses its own NavigationController rather than UINavigationController.
+// ItemListController pages therefore do not expose the marked root through
+// UIKit's navigationController property. Keep the VoidGram session across
+// pushes; clear it as soon as stock Telegram controllers become active.
+static atomic_bool AGInVoidStack = ATOMIC_VAR_INIT(false);
 static char AGRootMarker;
 static BOOL AGControllerIsWithinMarkedRoot(UIViewController *vc);
 
@@ -61,8 +66,10 @@ static UIViewController *AGVisibleController(UIViewController *controller, NSUIn
 
 static BOOL AGIsOnAyuPage(void) {
     if (![NSThread isMainThread]) return NO;
-    // Used only during construction of the unique VoidGram root screen.
-    if (atomic_load(&AGPendingAyuRoot)) return YES;
+    // The active settings session must survive custom Telegram navigation,
+    // including early construction of nested screens and their alert content.
+    // viewWillAppear/viewDidAppear below stop it when leaving VoidGram.
+    if (atomic_load(&AGPendingAyuRoot) || atomic_load(&AGInVoidStack)) return YES;
     for (UIWindow *window in UIApplication.sharedApplication.windows) {
         if (window.hidden || window.alpha < 0.01 || !window.rootViewController) continue;
         UIViewController *active = AGVisibleController(window.rootViewController, 0);
@@ -608,7 +615,7 @@ static void AGRefreshSettingsView(UIView *view, NSUInteger depth) {
     for (UIView *child in view.subviews) AGRefreshSettingsView(child, depth + 1);
 }
 static void AGRefreshAyuPage(UIViewController *vc) {
-    if (!vc || !vc.isViewLoaded || !AGControllerIsWithinMarkedRoot(vc)) return;
+    if (!vc || !vc.isViewLoaded || !AGIsOnAyuPage()) return;
     NSString *name = NSStringFromClass(vc.class);
     if ([name rangeOfString:@"ItemList" options:NSCaseInsensitiveSearch].location == NSNotFound &&
         [name rangeOfString:@"Void" options:NSCaseInsensitiveSearch].location == NSNotFound &&
@@ -617,27 +624,61 @@ static void AGRefreshAyuPage(UIViewController *vc) {
     if (vc.title.length && ![translated isEqualToString:vc.title]) vc.title = translated;
     AGRefreshSettingsView(vc.view, 0);
 }
+// A stock Telegram screen always closes translation scope. The root can be
+// reopened later by its unique intro text. Generic ItemListController pages
+// are deliberately NOT treated as stock controllers here.
+static BOOL AGIsStockTelegramPage(UIViewController *vc) {
+    NSString *name = NSStringFromClass(vc.class);
+    for (NSString *known in @[
+        @"ChatController", @"ChatListController", @"SettingsController",
+        @"AccountController", @"PeerInfoController", @"ContactsController",
+        @"CallsController", @"GalleryController", @"PhotoViewerController"
+    ]) {
+        if ([name rangeOfString:known options:NSCaseInsensitiveSearch].location != NSNotFound)
+            return YES;
+    }
+    return NO;
+}
+
+static IMP origAyuViewWillAppear = NULL;
+static void AGAyuViewWillAppear(UIViewController *vc, SEL sel, BOOL animated) {
+    // Do this BEFORE the original method builds the new screen's labels.
+    if (AGIsStockTelegramPage(vc)) {
+        atomic_store(&AGInVoidStack, false);
+        atomic_store(&AGPendingAyuRoot, false);
+    } else if (objc_getAssociatedObject(vc, &AGRootMarker)) {
+        atomic_store(&AGInVoidStack, true);
+    }
+    if (origAyuViewWillAppear)
+        ((void (*)(id, SEL, BOOL))origAyuViewWillAppear)(vc, sel, animated);
+}
+
 static void AGAyuViewDidAppear(UIViewController *vc, SEL sel, BOOL animated) {
     if (origAyuViewDidAppear)
         ((void (*)(id, SEL, BOOL))origAyuViewDidAppear)(vc, sel, animated);
     NSString *name = NSStringFromClass(vc.class);
+    if (AGIsStockTelegramPage(vc)) {
+        atomic_store(&AGInVoidStack, false);
+        atomic_store(&AGPendingAyuRoot, false);
+        return;
+    }
     if (atomic_load(&AGPendingAyuRoot) &&
         [name rangeOfString:@"ItemListController"].location != NSNotFound &&
         vc.isViewLoaded && vc.view.window) {
         objc_setAssociatedObject(vc, &AGRootMarker, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         atomic_store(&AGPendingAyuRoot, false);
-        NSLog(@"[VoidGramArabic] Identified unique VoidGram settings root");
+        atomic_store(&AGInVoidStack, true);
+        NSLog(@"[VoidGramArabic] Located VoidGram settings root; nested stack localization enabled");
     }
-    if (AGControllerIsWithinMarkedRoot(vc)) {
+    // Keep the scope from the marked root into EVERY nested ItemList page,
+    // even when UIKit's navigationController is nil (Telegram custom stack).
+    if (AGControllerIsWithinMarkedRoot(vc) || atomic_load(&AGInVoidStack)) {
+        atomic_store(&AGInVoidStack, true);
         __weak UIViewController *weakVC = vc;
         dispatch_async(dispatch_get_main_queue(), ^{
             UIViewController *page = weakVC;
             if (page) AGRefreshAyuPage(page);
         });
-    } else if ([name rangeOfString:@"ChatController"].location != NSNotFound ||
-               [name rangeOfString:@"SettingsController"].location != NSNotFound ||
-               [name rangeOfString:@"AccountController"].location != NSNotFound) {
-        atomic_store(&AGPendingAyuRoot, false);
     }
 }
 
@@ -645,6 +686,8 @@ __attribute__((constructor))
 static void AGStart(void) {
     @autoreleasepool {
         // Context marker follows ONLY the anchored VoidGram ItemListController stack.
+        AGHook(UIViewController.class, @selector(viewWillAppear:),
+               (IMP)AGAyuViewWillAppear, &origAyuViewWillAppear);
         AGHook(UIViewController.class, @selector(viewDidAppear:),
                (IMP)AGAyuViewDidAppear, &origAyuViewDidAppear);
         // UIKit surfaces used by settings, sheets, dialogs and plugin lists.
