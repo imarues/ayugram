@@ -589,7 +589,8 @@ static BOOL AGControllerIsWithinMarkedRoot(UIViewController *vc) {
             [name rangeOfString:@"ChatListController"].location != NSNotFound ||
             [name rangeOfString:@"AccountController"].location != NSNotFound ||
             [name rangeOfString:@"PeerInfoController"].location != NSNotFound) return NO;
-        if (objc_getAssociatedObject(vc, &AGRootMarker)) return YES;
+        if (objc_getAssociatedObject(vc, &AGRootMarker) ||
+            objc_getAssociatedObject(vc, &AGChildMarker)) return YES;
         UINavigationController *nav = vc.navigationController;
         if (nav) {
             for (UIViewController *item in nav.viewControllers) {
