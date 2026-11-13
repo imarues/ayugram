@@ -186,7 +186,7 @@ static BOOL AGIsExternalActionNode(id node) {
 
 static BOOL AGIsExternalActionView(UIView *view) {
     if (!view || ![NSThread isMainThread]) return NO;
-    for (UIView *v = view, *next = nil; v && next != v; v = next) {
+    for (UIView *v = view; v; v = v.superview) {
         NSString *name = NSStringFromClass([v class]);
         if ([name containsString:@"ContextControllerActionsListActionItem"] ||
             [name containsString:@"ContextAction"] ||
@@ -194,8 +194,6 @@ static BOOL AGIsExternalActionView(UIView *view) {
             [name containsString:@"UndoOverlay"] ||
             [name containsString:@"ActionSheetButton"] ||
             [name containsString:@"AlertController"]) return YES;
-        next = v.superview;
-        if (v == next) break;
     }
     return NO;
 }
@@ -450,8 +448,14 @@ static NSAttributedString *AGTranslateAttributed(NSAttributedString *original) {
 static IMP origUILabelText = NULL;
 static void AGUILabelText(UILabel *obj, SEL cmd, NSString *value) {
     AGCaptureFooterHeader(obj, value);
-    AG_CALL_VOID3(origUILabelText, obj, cmd, AGIsOnAyuPage() ? AGTranslate(value) :
-        (AGIsExternalActionView(obj) ? AGExternalExactText(value) : value));
+    BOOL settings = AGIsOnAyuPage();
+    // On chats, look up an exact VoidGram action BEFORE inspecting the view
+    // tree, which is hot for every ordinary Telegram message cell.
+    NSString *visible = value;
+    if (settings) visible = AGTranslate(value);
+    else if (value.length && AGExternalUIMap()[value] && AGIsExternalActionView(obj))
+        visible = AGExternalExactText(value);
+    AG_CALL_VOID3(origUILabelText, obj, cmd, visible);
 }
 static IMP origUILabelAttr = NULL;
 static void AGUILabelAttr(UILabel *obj, SEL cmd, NSAttributedString *value) {
@@ -489,8 +493,12 @@ static void AGBarTitle(UIBarButtonItem *obj, SEL cmd, NSString *value) {
 }
 static IMP origButtonTitle = NULL;
 static void AGButtonTitle(UIButton *obj, SEL cmd, NSString *value, UIControlState state) {
+    NSString *visible = value;
+    if (AGIsOnAyuPage()) visible = AGTranslate(value);
+    else if (value.length && AGExternalUIMap()[value] && AGIsExternalActionView(obj))
+        visible = AGExternalExactText(value);
     if (origButtonTitle)
-        ((void (*)(id, SEL, NSString *, UIControlState))origButtonTitle)(obj, cmd, AGTranslateActionTitle(value), state);
+        ((void (*)(id, SEL, NSString *, UIControlState))origButtonTitle)(obj, cmd, visible, state);
 }
 static IMP origButtonAttr = NULL;
 static void AGButtonAttr(UIButton *obj, SEL cmd, NSAttributedString *value, UIControlState state) {
