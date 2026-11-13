@@ -22,20 +22,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  cancel-stuck-run:
-    runs-on: ubuntu-latest
-    timeout-minutes: 3
-    permissions:
-      actions: write
-    steps:
-      - name: Cancel old stuck macOS build
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh api --method POST "repos/${{ github.repository }}/actions/runs/43460274620/cancel" || true
-
   build:
-    needs: cancel-stuck-run
     runs-on: macos-latest
     timeout-minutes: 20
     steps:
