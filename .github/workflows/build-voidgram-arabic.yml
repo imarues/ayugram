@@ -16,9 +16,27 @@ on:
 permissions:
   contents: read
 
+# Subsequent VoidGram builds supersede any still-pending build on this branch.
+concurrency:
+  group: voidgram-arabic-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  cancel-stuck-run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      actions: write
+    steps:
+      - name: Cancel old stuck macOS build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --method POST "repos/${{ github.repository }}/actions/runs/43460274620/cancel" || true
+
   build:
-    runs-on: macos-15
+    needs: cancel-stuck-run
+    runs-on: macos-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -42,6 +60,6 @@ jobs:
           shasum -a 256 dist/VoidGramArabic.dylib > dist/SHA256SUMS.txt
       - uses: actions/upload-artifact@v4
         with:
-          name: VoidGramArabic-27.6.9-iOS15-arm64
+          name: VoidGramArabic-27.8.2-iOS15-arm64
           path: dist/
           if-no-files-found: error
