@@ -21,6 +21,23 @@ static NSDictionary<NSString *, NSString *> *AGMap(void) {
     return map;
 }
 
+
+/*
+ * Outside the VoidGram settings stack, NEVER apply the full dictionary.
+ * This smaller map only contains explicit labels from VoidGram-specific
+ * chat menu actions, ghost-mode status banners and plugin dialogs.
+ */
+static NSDictionary<NSString *, NSString *> *AGExternalUIMap(void) {
+    static NSDictionary *map;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSData *data = [NSData dataWithBytes:VG_CHAT_UI_BYTES length:sizeof(VG_CHAT_UI_BYTES)];
+        id parsed = [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL];
+        map = [parsed isKindOfClass:[NSDictionary class]] ? parsed : @{};
+    });
+    return map;
+}
+
 static BOOL AGArabicEnabled(void) {
     id preference = [[NSUserDefaults standardUserDefaults] objectForKey:@"VoidGramArabicEnabled"];
     // The requested target is VoidGram's screens only, even if Telegram is set to English.
@@ -131,6 +148,76 @@ static NSDictionary<NSString *, NSString *> *AGNormalizedMap(void) {
         map = [entries copy];
     });
     return map;
+}
+
+
+/*
+ * Keep chat text, profile names, message previews and editable fields untouched.
+ * An external translation is eligible only when it is an exact feature label,
+ * and only at an action/alert API or in a known action/notice text node.
+ */
+static NSString *AGExternalExactText(NSString *text) {
+    if (!AGArabicEnabled() || ![text isKindOfClass:NSString.class] || !text.length) return text;
+    NSString *translated = AGExternalUIMap()[text];
+    if (!translated) translated = AGExternalUIMap()[AGCanonicalText(text)];
+    return translated.length ? translated : text;
+}
+
+static BOOL AGIsExternalActionNode(id node) {
+    if (!node || ![NSThread isMainThread]) return NO;
+    id current = node;
+    for (NSUInteger depth = 0; depth < 15 && current; depth++) {
+        NSString *name = NSStringFromClass([current class]);
+        // Only *action item* or notice nodes, not a whole context controller
+        // (the latter also contains a preview of the user's actual message).
+        if ([name containsString:@"ContextControllerActionsListActionItemNode"] ||
+            [name containsString:@"ContextActionNode"] ||
+            [name containsString:@"ContextMenuActionNode"] ||
+            [name containsString:@"UndoOverlayControllerNode"] ||
+            [name containsString:@"ActionSheetButton"] ||
+            [name containsString:@"AlertControllerNode"]) return YES;
+        SEL parentSelector = @selector(supernode);
+        if ([current respondsToSelector:parentSelector])
+            current = ((id (*)(id, SEL))objc_msgSend)(current, parentSelector);
+        else break;
+    }
+    return NO;
+}
+
+static BOOL AGIsExternalActionView(UIView *view) {
+    if (!view || ![NSThread isMainThread]) return NO;
+    for (UIView *v = view, *next = nil; v && next != v; v = next) {
+        NSString *name = NSStringFromClass([v class]);
+        if ([name containsString:@"ContextControllerActionsListActionItem"] ||
+            [name containsString:@"ContextAction"] ||
+            [name containsString:@"ContextMenuAction"] ||
+            [name containsString:@"UndoOverlay"] ||
+            [name containsString:@"ActionSheetButton"] ||
+            [name containsString:@"AlertController"]) return YES;
+        next = v.superview;
+        if (v == next) break;
+    }
+    return NO;
+}
+
+static NSString *AGTranslate(NSString *text);
+static NSString *AGTranslateActionTitle(NSString *text) {
+    if (AGIsOnAyuPage()) return AGTranslate(text);
+    return AGExternalExactText(text);
+}
+
+// Only invoked by Telegram's text nodes when nested inside a known action
+// item or its notice/alert. Never on arbitrary attributed-string constructors.
+static NSAttributedString *AGTranslateExternalActionAttributed(id node, NSAttributedString *original) {
+    if (![original isKindOfClass:NSAttributedString.class] || !original.length ||
+        !AGArabicEnabled() || ![NSThread isMainThread]) return original;
+    NSString *value = original.string;
+    NSString *replacement = AGExternalExactText(value);
+    if ([replacement isEqualToString:value] || !AGIsExternalActionNode(node)) return original;
+    // Keep the original font/color/link attributes as far as possible.
+    NSMutableAttributedString *copy = [original mutableCopy];
+    [copy replaceCharactersInRange:NSMakeRange(0, copy.length) withString:replacement];
+    return copy;
 }
 
 static NSString *AGTranslateNumericSummary(NSString *text) {
@@ -363,12 +450,13 @@ static NSAttributedString *AGTranslateAttributed(NSAttributedString *original) {
 static IMP origUILabelText = NULL;
 static void AGUILabelText(UILabel *obj, SEL cmd, NSString *value) {
     AGCaptureFooterHeader(obj, value);
-    AG_CALL_VOID3(origUILabelText, obj, cmd, AGTranslate(value));
+    AG_CALL_VOID3(origUILabelText, obj, cmd, AGIsOnAyuPage() ? AGTranslate(value) :
+        (AGIsExternalActionView(obj) ? AGExternalExactText(value) : value));
 }
 static IMP origUILabelAttr = NULL;
 static void AGUILabelAttr(UILabel *obj, SEL cmd, NSAttributedString *value) {
     AGCaptureFooterHeader(obj, value.string);
-    AG_CALL_VOID3(origUILabelAttr, obj, cmd, AGTranslateAttributed(value));
+    AG_CALL_VOID3(origUILabelAttr, obj, cmd, AGIsOnAyuPage() ? AGTranslateAttributed(value) : value);
 }
 static IMP origUITextViewText = NULL;
 static void AGUITextViewText(UITextView *obj, SEL cmd, NSString *value) {
@@ -397,12 +485,12 @@ static void AGControllerTitle(UIViewController *obj, SEL cmd, NSString *value) {
 }
 static IMP origBarTitle = NULL;
 static void AGBarTitle(UIBarButtonItem *obj, SEL cmd, NSString *value) {
-    AG_CALL_VOID3(origBarTitle, obj, cmd, AGTranslate(value));
+    AG_CALL_VOID3(origBarTitle, obj, cmd, AGTranslateActionTitle(value));
 }
 static IMP origButtonTitle = NULL;
 static void AGButtonTitle(UIButton *obj, SEL cmd, NSString *value, UIControlState state) {
     if (origButtonTitle)
-        ((void (*)(id, SEL, NSString *, UIControlState))origButtonTitle)(obj, cmd, AGTranslate(value), state);
+        ((void (*)(id, SEL, NSString *, UIControlState))origButtonTitle)(obj, cmd, AGTranslateActionTitle(value), state);
 }
 static IMP origButtonAttr = NULL;
 static void AGButtonAttr(UIButton *obj, SEL cmd, NSAttributedString *value, UIControlState state) {
@@ -432,20 +520,20 @@ static IMP origAlertFactory = NULL;
 static id AGAlertFactory(id cls, SEL cmd, NSString *title, NSString *msg, UIAlertControllerStyle style) {
     return origAlertFactory
         ? ((id (*)(id, SEL, NSString *, NSString *, UIAlertControllerStyle))origAlertFactory)
-            (cls, cmd, AGTranslate(title), AGTranslate(msg), style)
+            (cls, cmd, AGTranslateActionTitle(title), AGTranslateActionTitle(msg), style)
         : nil;
 }
 static IMP origActionFactory = NULL;
 static id AGActionFactory(id cls, SEL cmd, NSString *title, UIAlertActionStyle style, id handler) {
     return origActionFactory
         ? ((id (*)(id, SEL, NSString *, UIAlertActionStyle, id))origActionFactory)
-            (cls, cmd, AGTranslate(title), style, handler)
+            (cls, cmd, AGTranslateActionTitle(title), style, handler)
         : nil;
 }
 static IMP origSegmentTitle = NULL;
 static void AGSegmentTitle(UISegmentedControl *obj, SEL cmd, NSString *title, NSUInteger idx) {
     if (origSegmentTitle)
-        ((void (*)(id, SEL, NSString *, NSUInteger))origSegmentTitle)(obj, cmd, AGTranslate(title), idx);
+        ((void (*)(id, SEL, NSString *, NSUInteger))origSegmentTitle)(obj, cmd, AGTranslateActionTitle(title), idx);
 }
 
 static void AGHook(Class cls, SEL selector, IMP replacement, IMP *original) {
@@ -555,11 +643,13 @@ static IMP origImmediateTextAttributed = NULL;
 static IMP origTelegramTextAttributed = NULL;
 static void AGImmediateTextAttributed(id obj, SEL cmd, NSAttributedString *value) {
     AGCaptureFooterHeader(obj, value.string);
-    AG_CALL_VOID3(origImmediateTextAttributed, obj, cmd, AGTranslateAttributed(value));
+    AG_CALL_VOID3(origImmediateTextAttributed, obj, cmd, AGIsOnAyuPage() ?
+        AGTranslateAttributed(value) : AGTranslateExternalActionAttributed(obj, value));
 }
 static void AGTelegramTextAttributed(id obj, SEL cmd, NSAttributedString *value) {
     AGCaptureFooterHeader(obj, value.string);
-    AG_CALL_VOID3(origTelegramTextAttributed, obj, cmd, AGTranslateAttributed(value));
+    AG_CALL_VOID3(origTelegramTextAttributed, obj, cmd, AGIsOnAyuPage() ?
+        AGTranslateAttributed(value) : AGTranslateExternalActionAttributed(obj, value));
 }
 
 static void AGHookTelegramTextNodes(void) {

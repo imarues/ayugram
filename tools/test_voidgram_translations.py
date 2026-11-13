@@ -55,6 +55,19 @@ if rename_app_brand("Import from AyuGram Desktop") != "Import from AyuGram Deskt
     raise SystemExit("AyuGram Desktop brand must stay intact")
 if rename_app_brand("Open AyuGram settings") != "Open VoidGram settings":
     raise SystemExit("VoidGram brand alias failed")
+external_map = __import__("json").loads((ROOT / "locales" / "voidgram-chat-ui.json").read_text(encoding="utf-8"))
+for action_key in (
+    "Enable Ghost Mode in this chat",
+    "Disable Ghost Mode in this chat",
+    "Read receipts, typing and uploads are hidden in this chat. Online status is set separately.",
+    "Delete My Messages", "Send as a video message", "Send as a voice message",
+    "VoidGram · Copy Message IDs", "Send Logs", "Year in review",
+):
+    if action_key not in external_map:
+        raise SystemExit(f"Missing external chat UI action: {action_key}")
+for sensitive in ("Today", "Copy", "OK", "Reply", "Delete", "Message", "Privacy"):
+    if sensitive in external_map:
+        raise SystemExit(f"Unsafe generic external chat UI label: {sensitive}")
 source = (ROOT / "src" / "VoidGramArabic.m").read_text(encoding="utf-8")
 for gate in (
     'if (!AGIsOnAyuPage()) return text;',
@@ -117,6 +130,16 @@ for required_source in (
         raise SystemExit(f"VoidGram root footer suppression guard is missing: {required_source}")
 if "AGInAyuStack" in source:
     raise SystemExit("Old sticky global scope remains")
+for external_guard in (
+    "static NSDictionary<NSString *, NSString *> *AGExternalUIMap(void)",
+    "static BOOL AGIsExternalActionNode(id node)",
+    "static BOOL AGIsExternalActionView(UIView *view)",
+    "AGTranslateExternalActionAttributed(obj, value)",
+    "AGTranslateActionTitle(title)",
+    "AGIsOnAyuPage() ? AGTranslate(value)",
+):
+    if external_guard not in source:
+        raise SystemExit(f"Missing external UI isolation guard: {external_guard}")
 header = ROOT / "src" / "generated_voidgram_ar.h"
 if not header.is_file():
     raise SystemExit("Generated translation header missing; run build script first")
