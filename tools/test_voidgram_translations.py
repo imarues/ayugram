@@ -136,7 +136,7 @@ for external_guard in (
     "static BOOL AGIsExternalActionView(UIView *view)",
     "AGTranslateExternalActionAttributed(obj, value)",
     "AGTranslateActionTitle(title)",
-    "AGIsOnAyuPage() ? AGTranslate(value)",
+    "if (settings) visible = AGTranslate(value);",
 ):
     if external_guard not in source:
         raise SystemExit(f"Missing external UI isolation guard: {external_guard}")
