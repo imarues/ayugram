@@ -136,6 +136,10 @@ for external_guard in (
     "static BOOL AGIsExternalActionView(UIView *view)",
     "AGTranslateExternalActionAttributed(obj, value)",
     "AGTranslateActionTitle(title)",
+    "static NSString *AGTranslateYearReview(NSString *value)",
+    "if (!match || match.range.location != 0) return nil;",
+    "AGExternalExactText(value)",
+    "AGIsExternalActionView(obj)",
     "if (settings) visible = AGTranslate(value);",
 ):
     if external_guard not in source:
