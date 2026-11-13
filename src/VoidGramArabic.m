@@ -156,11 +156,50 @@ static NSDictionary<NSString *, NSString *> *AGNormalizedMap(void) {
  * An external translation is eligible only when it is an exact feature label,
  * and only at an action/alert API or in a known action/notice text node.
  */
+// The Year in Review panel is assembled from runtime counts and user names.
+// Match its complete, distinctive header and translate labels only; NEVER
+// replace usernames, dates, counts, message bodies or arbitrary substrings.
+static NSString *AGTranslateYearReview(NSString *value) {
+    if (value.length < 50 || value.length > 5000 ||
+        ![value containsString:@" of them yours."] ||
+        ![value containsString:@"Most active:"] ||
+        ![value containsString:@"Busiest month:"]) return nil;
+    static NSRegularExpression *header;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        header = [NSRegularExpression regularExpressionWithPattern:
+            @"^20[0-9]{2}: [0-9]+ messages, [0-9]+ of them yours\\."
+            options:0 error:NULL];
+    });
+    NSTextCheckingResult *match = [header firstMatchInString:value options:0
+        range:NSMakeRange(0, value.length)];
+    if (!match || match.range.location != 0) return nil;
+    NSString *out = value;
+    for (NSArray<NSString *> *pair in @[
+        @[@" messages, ", @" رسالة، "],
+        @[@" of them yours.", @" من رسائلك."],
+        @[@"Most active:", @"الأكثر نشاطاً:"],
+        @[@"Busiest month:", @"الشهر الأكثر نشاطاً:"],
+        @[@"Busiest day:", @"اليوم الأكثر نشاطاً:"],
+        @[@"Busiest hour:", @"الساعة الأكثر نشاطاً:"],
+        @[@"Characters:", @"الأحرف:"],
+        @[@"Media:", @"الوسائط:"],
+        @[@"voice and video messages:", @"الرسائل الصوتية والفيديو:"],
+        @[@"Frequent words:", @"الكلمات الأكثر استخداماً:"],
+        @[@"Favourite emoji:", @"الرموز التعبيرية الأكثر استخداماً:"]
+    ]) {
+        out = [out stringByReplacingOccurrencesOfString:pair[0] withString:pair[1]];
+    }
+    return out;
+}
+
 static NSString *AGExternalExactText(NSString *text) {
     if (!AGArabicEnabled() || ![text isKindOfClass:NSString.class] || !text.length) return text;
     NSString *translated = AGExternalUIMap()[text];
     if (!translated) translated = AGExternalUIMap()[AGCanonicalText(text)];
-    return translated.length ? translated : text;
+    if (translated.length) return translated;
+    NSString *review = AGTranslateYearReview(text);
+    return review ?: text;
 }
 
 static BOOL AGIsExternalActionNode(id node) {
