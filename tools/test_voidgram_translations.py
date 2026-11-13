@@ -68,7 +68,16 @@ for action_key in (
 for sensitive in ("Today", "Copy", "OK", "Reply", "Delete", "Message", "Privacy"):
     if sensitive in external_map:
         raise SystemExit(f"Unsafe generic external chat UI label: {sensitive}")
+# The earlier implementation never translated chat actions: those labels are
+# created BEFORE their Swift display nodes attach to the menu hierarchy.
+# Assert that exact matches are resolved before the settings-only scope gate.
 source = (ROOT / "src" / "VoidGramArabic.m").read_text(encoding="utf-8")
+external_lookup = source.find("NSString *outside = AGExternalUIMap()[text];")
+strict_scope = source.find("if (!AGIsOnAyuPage()) return text; // full dictionary remains settings-only")
+if external_lookup < 0 or strict_scope < 0 or external_lookup >= strict_scope:
+    raise SystemExit("VoidGram action translation still blocked by settings-only gate")
+if "AGTranslateYearReview(text)" not in source:
+    raise SystemExit("Dynamic Year in Review localization missing")
 for gate in (
     'if (!AGIsOnAyuPage()) return text;',
     '@"Just an exteraGram based client with ToS breaking features in mind."',

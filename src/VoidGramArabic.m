@@ -347,7 +347,20 @@ static NSString *AGTranslate(NSString *text) {
         [NSThread isMainThread]) {
         atomic_store(&AGPendingAyuRoot, true);
     }
-    if (!AGIsOnAyuPage()) return text; // exact mapping is never global
+    // VoidGram creates chat action titles and ghost-mode notices before
+    // they are attached to ContextActionNode / UndoOverlayControllerNode.
+    // An ancestor lookup at setAttributedText: therefore runs too early.
+    // Translate ONLY exact, explicit VoidGram UI keys at construction time.
+    // Never apply the large settings dictionary or substring replacement
+    // outside the scoped VoidGram settings controller.
+    NSString *outside = AGExternalUIMap()[text];
+    if (outside.length) return outside;
+    if ([text containsString:@" of them yours."] &&
+        [text containsString:@"Most active:"]) {
+        NSString *reviewText = AGTranslateYearReview(text);
+        if (reviewText.length) return reviewText;
+    }
+    if (!AGIsOnAyuPage()) return text; // full dictionary remains settings-only
     NSString *found = AGMap()[text];
     if (!found) found = AGMap()[AGCanonicalText(text)];
     if (!found) found = AGNormalizedMap()[AGNormalizedUILabel(text)];
@@ -494,12 +507,28 @@ static void AGUILabelText(UILabel *obj, SEL cmd, NSString *value) {
     if (settings) visible = AGTranslate(value);
     else if (value.length && AGExternalUIMap()[value] && AGIsExternalActionView(obj))
         visible = AGExternalExactText(value);
+    // Ghost Mode's status banner is an app-owned overlay, not a context action.
+    // These uniquely identifying full sentences cannot be confused with a
+    // generic Telegram menu item or partial user message.
+    if (!settings && [value hasPrefix:@"Read receipts, typing and uploads are "])
+        visible = AGExternalExactText(value);
     AG_CALL_VOID3(origUILabelText, obj, cmd, visible);
 }
 static IMP origUILabelAttr = NULL;
 static void AGUILabelAttr(UILabel *obj, SEL cmd, NSAttributedString *value) {
     AGCaptureFooterHeader(obj, value.string);
-    AG_CALL_VOID3(origUILabelAttr, obj, cmd, AGIsOnAyuPage() ? AGTranslateAttributed(value) : value);
+    NSAttributedString *translated = value;
+    if (AGIsOnAyuPage()) translated = AGTranslateAttributed(value);
+    else if (value.length && AGIsExternalActionView(obj)) {
+        NSString *replacement = AGExternalExactText(value.string);
+        if (![replacement isEqualToString:value.string]) {
+            NSMutableAttributedString *mutable = [value mutableCopy];
+            [mutable replaceCharactersInRange:NSMakeRange(0, mutable.length)
+                                    withString:replacement];
+            translated = mutable;
+        }
+    }
+    AG_CALL_VOID3(origUILabelAttr, obj, cmd, translated);
 }
 static IMP origUITextViewText = NULL;
 static void AGUITextViewText(UITextView *obj, SEL cmd, NSString *value) {
@@ -541,9 +570,20 @@ static void AGButtonTitle(UIButton *obj, SEL cmd, NSString *value, UIControlStat
 }
 static IMP origButtonAttr = NULL;
 static void AGButtonAttr(UIButton *obj, SEL cmd, NSAttributedString *value, UIControlState state) {
+    NSAttributedString *visible = value;
+    if (AGIsOnAyuPage()) visible = AGTranslateAttributed(value);
+    else if (value.length && AGIsExternalActionView(obj)) {
+        NSString *replacement = AGExternalExactText(value.string);
+        if (![replacement isEqualToString:value.string]) {
+            NSMutableAttributedString *mutable = [value mutableCopy];
+            [mutable replaceCharactersInRange:NSMakeRange(0, mutable.length)
+                                    withString:replacement];
+            visible = mutable;
+        }
+    }
     if (origButtonAttr)
         ((void (*)(id, SEL, NSAttributedString *, UIControlState))origButtonAttr)
-            (obj, cmd, AGTranslateAttributed(value), state);
+            (obj, cmd, visible, state);
 }
 static IMP origAttributedInit = NULL;
 static id AGAttributedInit(id obj, SEL cmd, NSString *value) {
