@@ -54,15 +54,18 @@ def build() -> dict[str, str]:
             check_placeholders(new_key, new_value)
             result[new_key] = new_value
             aliases += 1
-    extra_path = BASE / "voidgram-extra.json"
-    extra = json.loads(extra_path.read_text(encoding="utf-8"))
-    for key, value in extra.items():
-        if not isinstance(key, str) or not isinstance(value, str) or not value.strip():
-            raise ValueError(f"Invalid VoidGram translation: {key!r}")
-        check_placeholders(key, value)
-        result[key] = value
+    specific_count = 0
+    for name in ("voidgram-extra.json", "voidgram-27-8-2.json"):
+        extra_path = BASE / name
+        extra = json.loads(extra_path.read_text(encoding="utf-8"))
+        for key, value in extra.items():
+            if not isinstance(key, str) or not isinstance(value, str) or not value.strip():
+                raise ValueError(f"Invalid VoidGram translation in {name}: {key!r}")
+            check_placeholders(key, value)
+            result[key] = value
+        specific_count += len(extra)
     print(f"VoidGram dictionary: {len(original)} base + {aliases} renamed aliases + "
-          f"{len(extra)} specific entries = {len(result)} unique keys")
+          f"{specific_count} specific entries = {len(result)} unique keys")
     return result
 
 def main() -> None:

@@ -10,6 +10,12 @@ from build_voidgram_translations import build, rename_app_brand  # noqa: E402
 translations = build()
 required = (
     "Just an exteraGram based client with ToS breaking features in mind.",
+    # New VoidGram 27.8.2 strings verified against the supplied IPA.
+    "The plugin asks for:\n", "Copy diagnostics",
+    "Delete my messages?", "The cover is not loaded yet. Scroll to the track and try again.",
+    "Download video · ", "VoidGram · Copy Message IDs",
+    "MessageShot Appearance", "The player opens with the lyrics",
+    "The folder was created; it is at the top of the chat list.",
     "Privacy", "Messages", "Media & Calls", "Appearance", "Security",
     "More", "Sending", "Translation", "Filters", "Menu & gestures",
     "Chats", "Find channels and people", "Local notifications",
