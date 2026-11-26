@@ -1,6 +1,8 @@
 import UIKit
 import Foundation
 
+@_silgen_name("vgi_set_slot") private func nativeSetSlot(_ enabled: Int32) -> Int32
+@_silgen_name("vgi_editor_view") private func nativeEditorView(_ p: UnsafeMutableRawPointer) -> UnsafeMutableRawPointer?
 @_silgen_name("vgi_compatible") private func nativeCompatible() -> Int32
 @_silgen_name("vgi_kind") private func nativeKind(_ p: UnsafeMutableRawPointer) -> Int32
 @_silgen_name("vgi_width") private func nativeWidth(_ p: UnsafeMutableRawPointer) -> Double
@@ -89,6 +91,7 @@ private final class TranslateButton: UIButton {
     weak var original: UIButton?
     let globe = UIImageView(image: UIImage(systemName: "globe"))
     let badge = UILabel()
+    private var menuCode: String?
     init() {
         super.init(frame: .zero)
         accessibilityLabel = "ترجمة قبل الإرسال"
@@ -113,84 +116,93 @@ private final class TranslateButton: UIButton {
     @objc private func tapped() { original?.sendActions(for: .touchUpInside) }
     func sync(_ b: UIButton, anchor: UIView) {
         original = b
-        if menu !== b.menu { menu = b.menu }
         let code = UserDefaults.standard.string(forKey: "ayu.extra.translateTo") ?? "en"
-        badge.text = String(code.uppercased().prefix(3)); accessibilityValue = code.uppercased()
-        globe.tintColor = anchor.tintColor
+        // Swift rebuilds its own UIMenu during layout. Keep the exact same
+        // native menu/action objects while the user scrolls. Refresh ONLY
+        // on first attachment or a real language selection, not per timer.
+        if (menu == nil || menuCode != code), let source = b.menu {
+            menu = source; menuCode = code
+        }
+        let badgeCode = String(code.uppercased().prefix(3))
+        if badge.text != badgeCode { badge.text = badgeCode; accessibilityValue = code.uppercased() }
+        if globe.tintColor != anchor.tintColor { globe.tintColor = anchor.tintColor }
     }
 }
 private final class ComposerPlacement {
     weak var bar: UIView?
     weak var original: UIButton?
-    weak var editor: NSObject?
-    weak var editorView: UIView?
-    var baseline: Double?
-    var applied: Double?
-    var lastWidth: Double=0
+    weak var panel: NSObject?
     let button = TranslateButton()
-    private var insetViews = [(UITextView, UIEdgeInsets)]()
-    private var changedEditor: (UIView, CGRect)?
-    let gap: CGFloat = 33
-    init(_ bar: UIView) { self.bar = bar }
-    private func restoreFallback() {
-        for (tv,old) in insetViews {
-            if abs(tv.textContainerInset.right-old.right-gap)<1 { tv.textContainerInset=old }
-        }
-        insetViews.removeAll()
-        if let (v,old)=changedEditor,abs(v.frame.width-old.width+gap)<1 { v.frame=old }
-        changedEditor=nil
+    let gap: CGFloat = 34
+    private final class Shift {
+        weak var view: UIView?
+        var base: CGRect
+        var placed: CGRect
+        init(_ view:UIView,_ base:CGRect,_ placed:CGRect){self.view=view;self.base=base;self.placed=placed}
     }
-    private func restoreNative() {
-        if let e=editor,let old=baseline,let new=applied,abs(nativeEditorInset(ptr(e))-new)<0.1,lastWidth>=50 {
-            _=nativeEditorReserve(ptr(e),lastWidth,new,old)
+    private var shifts = [ObjectIdentifier:Shift]()
+    init(_ bar: UIView) { self.bar = bar }
+    private func close(_ a:CGRect,_ b:CGRect) -> Bool {
+        abs(a.minX-b.minX)<0.75 && abs(a.minY-b.minY)<0.75 &&
+        abs(a.width-b.width)<0.75 && abs(a.height-b.height)<0.75
+    }
+    private func restoreShifts(except keep:Set<ObjectIdentifier> = []) {
+        for key in Array(shifts.keys) where !keep.contains(key) {
+            if let shift=shifts.removeValue(forKey:key),let v=shift.view,close(v.frame,shift.placed) { v.frame=shift.base }
         }
-        editor=nil;editorView=nil;baseline=nil;applied=nil;lastWidth=0
     }
     func reset() {
-        restoreNative();restoreFallback()
-        original?.isHidden=false;original=nil
+        restoreShifts()
+        original?.isHidden=false; original=nil
         button.removeFromSuperview()
         bar?.isUserInteractionEnabled=true
     }
-    private func reserve(_ e:NSObject?, _ richView:UIView?, _ clip:UIView?) {
-        if editor !== e { restoreNative();restoreFallback();editor=e }
-        if let e,let v=richView ?? nodeView(e),v.bounds.width>=50 {
-            let current=nativeEditorInset(ptr(e)), width=Double(v.bounds.width)
-            if current>=0 && current<=180 {
-                if applied==nil || abs(current-(applied ?? -1000))>0.1 { baseline=current;applied=nil }
-                let desired=(baseline ?? current)+Double(gap)
-                if abs(current-desired)<0.1 && abs(width-lastWidth)<0.5 { restoreFallback();return }
-                if nativeEditorReserve(ptr(e),width,current,desired) != 0 {
-                    editorView=v;applied=desired;lastWidth=width
-                    restoreFallback();return
-                }
-            }
-        }
-        // Older UIKit text backends: keep a real editable margin, not merely a clip.
-        let views=clip.map { descendants($0,limit:500) } ?? []
-        let editors=views.compactMap{$0 as? UITextView}
-        for tv in editors {
-            if let old=insetViews.first(where:{$0.0===tv})?.1 {
-                if abs(tv.textContainerInset.right-old.right)<1 { var inset=old;inset.right+=gap;tv.textContainerInset=inset }
-            } else {
-                let old=tv.textContainerInset;insetViews.append((tv,old));var inset=old;inset.right+=gap;tv.textContainerInset=inset
-            }
-        }
-        if editors.isEmpty,let v=richView,v.frame.width>80 {
-            if let (_,old)=changedEditor {
-                if abs(v.frame.width-old.width)<1 { v.frame.size.width-=gap;v.setNeedsLayout();v.layoutIfNeeded() }
-            } else {
-                changedEditor=(v,v.frame);v.frame.size.width-=gap;v.setNeedsLayout();v.layoutIfNeeded()
-            }
-        }
-    }
-    func place(_ b:UIButton,stack:UIStackView,anchor a:UIView,parent:UIView,editor e:NSObject?,richView:UIView?,clip:UIView?) {
+    func place(_ b:UIButton,stack:UIStackView,anchor a:UIView,parent:UIView,peers:[UIView],
+               panel p:NSObject?,editor e:NSObject?,richView:UIView?,slotChanged:Bool) {
         if original !== b { original?.isHidden=false;original=b }
+        panel=p
         let frame=CGRect(x:a.frame.minX-gap,y:a.frame.minY,width:gap,height:a.frame.height)
-        guard frame.minX>=parent.bounds.minX-2,frame.height>15 else { return }
-        if button.superview !== parent { button.removeFromSuperview();parent.addSubview(button) }
-        button.frame=frame;parent.bringSubviewToFront(button);button.sync(b,anchor:a)
-        reserve(e,richView,clip)
+        guard frame.minX>=parent.bounds.minX-2,frame.height>15 else { reset();return }
+
+        // Patch the native text layout, not just the visible view's clipping
+        // rectangle. Refresh the real editor once immediately; every later
+        // native layout computes the reserved margin itself.
+        if slotChanged {
+            if let p { _=nativeRelayout(ptr(p)) }
+            if let e,let v=(object(nativeEditorView(ptr(e))) as? UIView) ?? richView ?? nodeView(e),
+               v.bounds.width>=50 {
+                let right=nativeEditorInset(ptr(e))
+                if right>=0 && right<=180 { _=nativeEditorReserve(ptr(e),Double(v.bounds.width),right,right) }
+            }
+        }
+
+        // Native gift/other accessory views live left of emoji. Shift those
+        // peers by the exact reserved slot, leaving the emoji fixed. Keep a
+        // reversible baseline rather than accumulating offsets on each tick.
+        var kept=Set<ObjectIdentifier>()
+        for v in peers where v !== a && v.superview === parent && visible(v) {
+            let key=ObjectIdentifier(v)
+            let old=shifts[key]
+            let base=(old != nil && close(v.frame,old!.placed)) ? old!.base : v.frame
+            guard base.midX<a.frame.midX && a.frame.minX-base.maxX<180 &&
+                abs(base.midY-a.frame.midY)<12 else { continue }
+            let target=base.offsetBy(dx:-gap,dy:0)
+            guard target.minX>=parent.bounds.minX-2 else { continue }
+            kept.insert(key)
+            if !close(v.frame,target) { v.frame=target }
+            shifts[key]=Shift(v,base,target)
+        }
+        restoreShifts(except:kept)
+        // If the app puts a visible accessory in the proposed slot but it
+        // cannot be moved safely, leave the original control intact.
+        if peers.contains(where:{$0 !== a && $0.superview === parent && visible($0) &&
+            $0.frame.intersects(frame.insetBy(dx:2,dy:2))}) { reset();return }
+        if button.superview !== parent {
+            button.removeFromSuperview();parent.addSubview(button)
+        }
+        if !close(button.frame,frame) { button.frame=frame }
+        if parent.subviews.last !== button { parent.bringSubviewToFront(button) }
+        button.sync(b,anchor:a)
         b.isHidden=true
         bar?.isUserInteractionEnabled = !stack.arrangedSubviews.allSatisfy{ $0.isHidden }
     }
@@ -292,7 +304,7 @@ private final class Coordinator: NSObject {
         NotificationCenter.default.addObserver(self,selector:#selector(schedule),name:UITextView.textDidChangeNotification,object:nil)
         let t=Timer(timeInterval:0.4,target:self,selector:#selector(tick),userInfo:nil,repeats:true)
         RunLoop.main.add(t,forMode:.common); timer=t
-        NSLog("[VGI3] Composer/history loaded; fingerprint=%d",nativeCompatible())
+        NSLog("[VGI4] Composer/history loaded; fingerprint=%d",nativeCompatible())
         schedule()
     }
     @objc func schedule() {
@@ -382,7 +394,7 @@ private final class Coordinator: NSObject {
                         let r=v.convert(v.bounds,to:w);return abs(r.maxY-ar.midY)<180 ? n:nil
                     }.first
                 }
-                let clip=panel.flatMap{object(nativeClip(ptr($0))) as? UIView} ??
+                let clip=panel.flatMap{nodeView(object(nativeClip(ptr($0))))} ??
                     all.first(where:{$0.layer.name=="textInputNodeClippingContainer" && abs($0.convert($0.bounds,to:w).midY-ar.midY)<120})
                 var editor=panel.flatMap{object(nativeEditor(ptr($0))) as? NSObject}
                 let local=clip.map{descendants($0,limit:500)} ?? all
@@ -393,13 +405,24 @@ private final class Coordinator: NSObject {
                     }.first
                 }
                 let richView=local.first(where:{kind($0)==11 && visible($0) && abs($0.convert($0.bounds,to:w).midY-ar.midY)<140})
+                let state=nativeSetSlot(1)
+                guard state>=0 else { continue }
                 let key=ObjectIdentifier(bar);seen.insert(key)
                 let placement=placements[key] ?? ComposerPlacement(bar);placements[key]=placement
-                placement.place(b,stack:stack,anchor:a,parent:parent,editor:editor,richView:richView,clip:clip)
+                placement.place(b,stack:stack,anchor:a,parent:parent,peers:candidates,panel:panel,editor:editor,richView:richView,slotChanged:state==1)
             }
             if nativeCompatible() != 0 { history(w,all:all) }
         }
-        for k in Array(placements.keys) where !seen.contains(k) { placements.removeValue(forKey:k)?.reset() }
+        var oldPanels=[NSObject]()
+        for k in Array(placements.keys) where !seen.contains(k) {
+            if let placement=placements.removeValue(forKey:k) {
+                if let p=placement.panel { oldPanels.append(p) }
+                placement.reset()
+            }
+        }
+        if seen.isEmpty && nativeSetSlot(0)==1 {
+            for p in oldPanels { _=nativeRelayout(ptr(p)) }
+        }
     }
 }
 @_cdecl("vgi_views_changed") public func vgiViewsChanged() { DispatchQueue.main.async { Coordinator.shared.schedule() } }

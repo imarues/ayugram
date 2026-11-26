@@ -30,6 +30,23 @@ static const struct mach_header_64 *image(const char *suffix,const uint8_t *uuid
 static const struct mach_header_64 *ui(void){static const struct mach_header_64 *h=0;if(!h)h=image("/TelegramUIFramework",ui_uuid);return h;}
 static const struct mach_header_64 *pb(void){static const struct mach_header_64 *h=0;if(!h)h=image("/PostboxFramework",pb_uuid);return h;}
 int vgi_compatible(void){return ui()!=0&&pb()!=0;}
+// Exact V4 native layout sites plus executable header trampoline. The byte
+// resides in verified, file-backed RW alignment padding (not Swift objects).
+// -1: unsupported image, 0: already set, 1: state changed.
+int vgi_set_slot(int enabled) {
+    const uint8_t *base=(const void*)ui();
+    if(!base || *(const uint32_t*)(base+0x2f97b3c)!=0x17422131 ||
+        *(const uint32_t*)(base+0x2f97cd8)!=0x174220d2 ||
+        *(const uint32_t*)(base+0x2f97ce4)!=0x174220d7 ||
+        *(const uint32_t*)(base+0x20000)!=0xb0035990) return -1;
+    volatile uint8_t *flag=(volatile uint8_t *)(base+0x6b51c7f);
+    uint8_t value=enabled?1:0;
+    if(*flag==value)return 0;
+    if(*flag>1)return -1;
+    *flag=value;
+    return 1;
+}
+
 static Class exact_class(void *obj,const char *name){
     if(!obj)return Nil;
     Class c=object_getClass((id)obj);
@@ -96,6 +113,10 @@ void *vgi_editor(void *panel){
     void *obj=read_object(panel,"_TtC22ChatTextInputPanelNode22ChatTextInputPanelNode",0x23,9);
     return vgi_kind(obj)==10?obj:0;
 }
+void *vgi_editor_view(void *editor){
+    if(!ui())return 0;
+    return read_object(editor,"_TtC26ChatRichTextEditorComposer27RichTextEditorChatInputNode",0xa,1);
+}
 static double *editor_inset(void *editor){
     if(!ui())return 0;
     return field(editor,"_TtC26ChatRichTextEditorComposer27RichTextEditorChatInputNode",0xa,5,8);
@@ -120,7 +141,7 @@ int vgi_editor_reserve(void *editor,double width,double expected,double right){
     // d1+14 in the actual editor-layout margins. d0 is the editor width.
     if(*(const uint32_t*)(base+0x2f97aec)!=0xd101c3ff||
        *(const uint32_t*)(base+0x2f97b14)!=0xfc286a81||
-       *(const uint32_t*)(base+0x2f97b3c)!=0x1e659000||
+       *(const uint32_t*)(base+0x2f97b3c)!=0x17422131||
        *(const uint32_t*)(base+0x2f97b6c)!=0xd63f0100)return 0;
     vgi_editor_layout_call(editor,(void*)(base+0x2f97aec),width,right);
     return *p==right;
