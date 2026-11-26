@@ -30,23 +30,18 @@ static const struct mach_header_64 *image(const char *suffix,const uint8_t *uuid
 static const struct mach_header_64 *ui(void){static const struct mach_header_64 *h=0;if(!h)h=image("/TelegramUIFramework",ui_uuid);return h;}
 static const struct mach_header_64 *pb(void){static const struct mach_header_64 *h=0;if(!h)h=image("/PostboxFramework",pb_uuid);return h;}
 int vgi_compatible(void){return ui()!=0&&pb()!=0;}
-// Exact V4 native layout sites plus executable header trampoline. The byte
-// resides in verified, file-backed RW alignment padding (not Swift objects).
-// -1: unsupported image, 0: already set, 1: state changed.
-int vgi_set_slot(int enabled) {
+// A version-gated trampoline preserves the selected native accessory's
+// extra 34pt through subsequent theme/string width recalculations.
+static uintptr_t *selected_slot(void) {
     const uint8_t *base=(const void*)ui();
-    if(!base || *(const uint32_t*)(base+0x2f97b3c)!=0x17422131 ||
-        *(const uint32_t*)(base+0x2f97cd8)!=0x174220d2 ||
-        *(const uint32_t*)(base+0x2f97ce4)!=0x174220d7 ||
-        *(const uint32_t*)(base+0x20000)!=0xb0035990) return -1;
-    volatile uint8_t *flag=(volatile uint8_t *)(base+0x6b51c7f);
-    uint8_t value=enabled?1:0;
-    if(*flag==value)return 0;
-    if(*flag>1)return -1;
-    *flag=value;
-    return 1;
+    if(!base || *(const uint32_t*)(base+0x29b0b14)!=0x1759bd3b ||
+        *(const uint32_t*)(base+0x20000)!=0x90034b10) return 0;
+    return (uintptr_t *)(base+0x6980628);
 }
-
+void vgi_select_accessory(void *obj) {
+    uintptr_t *slot=selected_slot();
+    if(slot)*slot=(uintptr_t)obj;
+}
 static Class exact_class(void *obj,const char *name){
     if(!obj)return Nil;
     Class c=object_getClass((id)obj);
@@ -151,7 +146,7 @@ int vgi_editor_reserve(void *editor,double width,double expected,double right){
     // d1+14 in the actual editor-layout margins. d0 is the editor width.
     if(*(const uint32_t*)(base+0x2f97aec)!=0xd101c3ff||
        *(const uint32_t*)(base+0x2f97b14)!=0xfc286a81||
-       *(const uint32_t*)(base+0x2f97b3c)!=0x17422131||
+       *(const uint32_t*)(base+0x2f97b3c)!=0x1e659000||
        *(const uint32_t*)(base+0x2f97b6c)!=0xd63f0100)return 0;
     vgi_editor_layout_call(editor,(void*)(base+0x2f97aec),width,right);
     return *p==right;
@@ -231,7 +226,12 @@ void *vgi_action_label(void *row){
 }
 static double *accessory_width(void *obj){
     if(!ui())return NULL;
-    return field(obj,"_TtC22ChatTextInputPanelNode23AccessoryItemIconButton",0x16,3,sizeof(double));
+    Class cls=exact_class(obj,"_TtC22ChatTextInputPanelNode23AccessoryItemIconButton");
+    if(!cls)return 0;
+    Ivar ivar=class_getInstanceVariable(cls,"width");
+    size_t off=ivar?(size_t)ivar_getOffset(ivar):0x48;
+    if(off!=0x48 || class_getInstanceSize(cls)<off+sizeof(double))return 0;
+    return (double*)((char*)obj+off);
 }
 double vgi_width(void *obj){double *p=accessory_width(obj);return p?*p:0;}
 int vgi_set_width(void *obj,double expected,double value){

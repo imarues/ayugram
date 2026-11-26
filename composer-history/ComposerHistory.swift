@@ -3,7 +3,7 @@ import Foundation
 
 @_silgen_name("vgi_kira_has_history") private func kiraHasHistory(_ key:UnsafeMutableRawPointer) -> Int32
 @_silgen_name("vgi_kira_show_history") private func kiraShowHistory(_ key:UnsafeMutableRawPointer,_ host:UnsafeMutableRawPointer) -> Int32
-@_silgen_name("vgi_set_slot") private func nativeSetSlot(_ enabled: Int32) -> Int32
+@_silgen_name("vgi_select_accessory") private func nativeSelectAccessory(_ p: UnsafeMutableRawPointer?)
 @_silgen_name("vgi_panel_writable") private func nativePanelWritable(_ p: UnsafeMutableRawPointer) -> Int32
 @_silgen_name("vgi_editor_view") private func nativeEditorView(_ p: UnsafeMutableRawPointer) -> UnsafeMutableRawPointer?
 @_silgen_name("vgi_compatible") private func nativeCompatible() -> Int32
@@ -165,6 +165,8 @@ private final class TranslateButton: UIButton {
         if globe.tintColor != anchor.tintColor { globe.tintColor = anchor.tintColor }
     }
 }
+// Actual input controls own the translation slot. Keep the original native
+// control available until a replacement has a confirmed, interactive frame.
 private final class ComposerPlacement {
     weak var bar: UIView?
     weak var original: UIButton?
@@ -173,63 +175,84 @@ private final class ComposerPlacement {
     let button = TranslateButton()
     let gap: CGFloat = 34
     private var baseWidth: Double?
-    private var originalWasHidden=false
-    private var originalBarInteraction=true
+    private var originalBarInteraction: Bool
     private var glyphShifts=[ObjectIdentifier:(CALayer,CATransform3D,CATransform3D)]()
-    init(_ bar:UIView) { self.bar=bar; originalBarInteraction=bar.isUserInteractionEnabled }
+    private var peerShifts=[ObjectIdentifier:(UIView,CGRect,CGRect)]()
+    private var editorState: (NSObject,Double,Double,Double)?
+    private var textState: (UITextView,UIEdgeInsets,UIEdgeInsets)?
+    init(_ bar:UIView) { self.bar=bar;originalBarInteraction=bar.isUserInteractionEnabled }
     private func close(_ a:Double,_ b:Double)->Bool { abs(a-b)<0.75 }
-    private func restoreGlyphs(){
+    private func restoreGlyphs() {
         for (_,entry) in glyphShifts where CATransform3DEqualToTransform(entry.0.transform,entry.2) {
             entry.0.transform=entry.1
         }
         glyphShifts.removeAll()
     }
+    private func restorePeers() {
+        for (_,e) in peerShifts where e.0.frame==e.2 {e.0.frame=e.1}
+        peerShifts.removeAll()
+    }
+    private func restoreEditor() {
+        if let (text,base,changed)=textState,text.textContainerInset==changed {text.textContainerInset=base}
+        textState=nil
+        if let (e,width,base,changed)=editorState,close(nativeEditorInset(ptr(e)),changed) {
+            _=nativeEditorReserve(ptr(e),width,changed,base)
+        }
+        editorState=nil
+    }
     private func releaseAccessory() {
-        button.removeFromSuperview()
-        restoreGlyphs()
+        button.removeFromSuperview();restoreGlyphs();restorePeers();restoreEditor()
+        nativeSelectAccessory(nil)
         if let a=accessory,let base=baseWidth {
             let current=nativeWidth(ptr(a))
-            if close(current,base+Double(gap)) && nativeSetWidth(ptr(a),current,base) != 0,
+            if close(current,base+Double(gap)),nativeSetWidth(ptr(a),current,base) != 0,
                let p=panel { _=nativeRelayout(ptr(p)) }
         }
         accessory=nil;panel=nil;baseWidth=nil
     }
-    func reset(){
+    func reset() {
         releaseAccessory()
-        original?.isHidden=originalWasHidden
-        original=nil
+        original?.isHidden=false;original=nil
         bar?.isUserInteractionEnabled=originalBarInteraction
     }
-    // A composer may still supply its floating original button in a channel
-    // that has no input panel. Suppress it; never place a button over the feed.
-    func suppress(_ b:UIButton,stack:UIStackView){
-        if original !== b {
-            original?.isHidden=originalWasHidden
-            original=b;originalWasHidden=b.isHidden
-        }
-        b.isHidden=true
-        bar?.isUserInteractionEnabled = !stack.arrangedSubviews.allSatisfy{$0.isHidden}
+    private func track(_ b:UIButton) {
+        if original !== b {original?.isHidden=false;original=b}
+    }
+    private func restoreOriginal(_ b:UIButton) {
+        track(b);button.removeFromSuperview();b.isHidden=false
+        bar?.isUserInteractionEnabled=originalBarInteraction
+    }
+    func showOriginal(_ b:UIButton) {
+        releaseAccessory();restoreOriginal(b)
     }
     func noInput(_ b:UIButton,stack:UIStackView) {
-        releaseAccessory();suppress(b,stack:stack)
+        releaseAccessory();track(b);b.isHidden=true
+        bar?.isUserInteractionEnabled = !stack.arrangedSubviews.allSatisfy{$0.isHidden}
     }
     private func alignGlyphs(_ a:UIView,base:CGFloat) {
-        // The system centers its existing icon within the widened native
-        // accessory. Keep that icon in its original trailing physical slot.
-        var kept=Set<ObjectIdentifier>()
+        var layers=[CALayer]()
         for i in 0..<5 {
-            guard let o=object(nativeGlyph(ptr(a),Int32(i))),let layer=nodeLayer(o),
-                  layer !== a.layer,layer.superlayer != nil,layer.bounds.width>0 else{continue}
+            if let o=object(nativeGlyph(ptr(a),Int32(i))),let layer=nodeLayer(o) { layers.append(layer) }
+        }
+        // Component-hosted sticker/emoji animations have a direct UIView
+        // subview even when their Swift ComponentView is not itself a view.
+        layers += a.subviews.filter{visible($0)&&$0.bounds.width<=base+12&&$0.bounds.height<=75}.map{$0.layer}
+        var kept=Set<ObjectIdentifier>()
+        for layer in layers {
+            guard layer !== a.layer,layer.superlayer != nil,layer.bounds.width>0 else{continue}
             let id=ObjectIdentifier(layer)
+            guard !kept.contains(id) else{continue}
+            // Avoid shifting an inner layer twice with its containing view.
+            var ancestor=layer.superlayer,already=false
+            while let p=ancestor,p !== a.layer {if layers.contains(where:{$0===p}) {already=true;break};ancestor=p.superlayer}
+            if already {continue}
             let previous=glyphShifts[id]
-            let origin=(previous != nil && CATransform3DEqualToTransform(layer.transform,previous!.2)) ? previous!.1 : layer.transform
+            let ours=previous != nil && CATransform3DEqualToTransform(layer.transform,previous!.2)
+            let origin=ours ? previous!.1 : layer.transform
             let actual=layer.convert(CGPoint(x:layer.bounds.midX,y:layer.bounds.midY),to:a.layer).x
-            let target=a.bounds.maxX-base/2
-            let currentOffset:CGFloat=(previous != nil && CATransform3DEqualToTransform(layer.transform,previous!.2)) ? previous!.2.m41-previous!.1.m41 : 0
-            let delta=target-(actual-currentOffset)
-            // Preserve native animation transforms and only adjust the
-            // expected centered icon; skip non-icon / unrelated layers.
-            guard abs(delta)<=gap/2+5 else{continue}
+            let oldDelta:CGFloat=ours ? previous!.2.m41-previous!.1.m41 : 0
+            let delta=(a.bounds.maxX-base/2)-(actual-oldDelta)
+            guard abs(delta)<=gap/2+6 else{continue}
             let transform=CATransform3DTranslate(origin,delta,0,0)
             if !CATransform3DEqualToTransform(layer.transform,transform) {
                 CATransaction.begin();CATransaction.setDisableActions(true)
@@ -241,36 +264,86 @@ private final class ComposerPlacement {
             if let e=glyphShifts.removeValue(forKey:k),CATransform3DEqualToTransform(e.0.transform,e.2){e.0.transform=e.1}
         }
     }
-    func place(_ b:UIButton,stack:UIStackView,anchor a:UIView,panel p:NSObject,clip:UIView) {
-        suppress(b,stack:stack)
-        if accessory !== a || panel !== p {
-            releaseAccessory();accessory=a;panel=p
+    // If a layout variant doesn't provide a native width slot, reserve
+    // the actual editing margin before using the sibling geometry.
+    private func reserveEditor(_ editor:NSObject?,_ clip:UIView?,_ rich:UIView?) -> Bool {
+        if let e=editor,let v=(object(nativeEditorView(ptr(e))) as? UIView) ?? rich ?? nodeView(e),v.bounds.width>=100 {
+            let current=nativeEditorInset(ptr(e))
+            if let old=editorState,old.0===e,close(current,old.3){return true}
+            if current>=0,current<=180,nativeEditorReserve(ptr(e),Double(v.bounds.width),current,current+Double(gap)) != 0 {
+                editorState=(e,Double(v.bounds.width),current,current+Double(gap));return true
+            }
         }
-        let width=nativeWidth(ptr(a))
-        guard width>=12,width<=125 else {releaseAccessory();return}
-        if let old=baseWidth {
-            if !close(width,old+Double(gap)) {baseWidth=width}
-        } else {baseWidth=width}
-        guard let base=baseWidth,base>=12,base<=90 else {releaseAccessory();return}
-        let wanted=base+Double(gap)
-        if !close(width,wanted) {
-            guard nativeSetWidth(ptr(a),width,wanted) != 0 else{releaseAccessory();return}
-            _=nativeRelayout(ptr(p))
+        if let clip,let v=descendants(clip,limit:500).compactMap({$0 as? UITextView}).first(where:{$0.isEditable&&visible($0)&&$0.bounds.width>=100}) {
+            if let old=textState,old.0===v,v.textContainerInset==old.2{return true}
+            let base=v.textContainerInset
+            var placed=base;placed.right += gap
+            v.textContainerInset=placed
+            if v.textContainerInset==placed {textState=(v,base,placed);return true}
         }
-        // Do not draw a floating or overlapping substitute. Wait until the
-        // native composer has actually allocated the additional width.
-        guard close(Double(a.bounds.width),wanted),let parent=a.superview,
-              visible(clip),clip.window===a.window else {
-            button.removeFromSuperview();return
-        }
-        let anchorRect=a.convert(a.bounds,to:parent)
-        let frame=CGRect(x:anchorRect.minX,y:anchorRect.minY,width:gap,height:anchorRect.height)
-        guard frame.height>=20,frame.minX>=parent.bounds.minX-2 else{button.removeFromSuperview();return}
-        alignGlyphs(a,base:CGFloat(base))
+        return false
+    }
+    private func show(_ b:UIButton,stack:UIStackView,anchor a:UIView,parent:UIView,frame:CGRect) {
+        guard frame.width>=20,frame.height>=20,frame.minX>=parent.bounds.minX-2 else {restoreOriginal(b);return}
         if button.superview !== parent {button.removeFromSuperview();parent.addSubview(button)}
         if button.frame != frame {button.frame=frame}
         if parent.subviews.last !== button {parent.bringSubviewToFront(button)}
         button.sync(b,anchor:a)
+        // The previous release hid the original before this point. Keep
+        // it until the inline control really exists and is visible.
+        guard visible(button) else {restoreOriginal(b);return}
+        b.isHidden=true
+        bar?.isUserInteractionEnabled = !stack.arrangedSubviews.allSatisfy{$0.isHidden}
+    }
+    func place(_ b:UIButton,stack:UIStackView,anchor a:UIView,panel p:NSObject?,clip:UIView?,editor:NSObject?,rich:UIView?,peers:[UIView]) {
+        track(b)
+        if accessory !== a {
+            releaseAccessory();accessory=a
+        }
+        if let p {panel=p}
+        guard let parent=a.superview else{restoreOriginal(b);return}
+        let width=nativeWidth(ptr(a))
+        if width>=12,width<=125 {
+            if baseWidth==nil {baseWidth=width}
+            if let base=baseWidth,base>=12,base<=90 {
+                let wanted=base+Double(gap)
+                nativeSelectAccessory(ptr(a))
+                if !close(width,wanted),nativeSetWidth(ptr(a),width,wanted) != 0 {
+                    if let panel { _=nativeRelayout(ptr(panel)) }
+                    else {a.superview?.setNeedsLayout()}
+                } else if !close(Double(a.bounds.width),wanted),let panel {
+                    _=nativeRelayout(ptr(panel))
+                }
+                if close(Double(a.bounds.width),wanted) {
+                    restorePeers();restoreEditor()
+                    alignGlyphs(a,base:CGFloat(base))
+                    let r=a.convert(a.bounds,to:parent)
+                    show(b,stack:stack,anchor:a,parent:parent,frame:CGRect(x:r.minX,y:r.minY,width:gap,height:r.height))
+                    return
+                }
+            }
+        }
+        // No confirmed native frame yet. Use only a verified editor inset,
+        // otherwise keep the existing translation control usable.
+        restoreGlyphs()
+        guard reserveEditor(editor,clip,rich) else {restoreOriginal(b);return}
+        let frame=CGRect(x:a.frame.minX-gap,y:a.frame.minY,width:gap,height:a.frame.height)
+        var kept=Set<ObjectIdentifier>()
+        for v in peers where v !== a && v.superview===parent && visible(v) {
+            let id=ObjectIdentifier(v),old=peerShifts[id]
+            let base=(old != nil && v.frame==old!.2) ? old!.1 : v.frame
+            guard base.midX<a.frame.midX && a.frame.minX-base.maxX<180 && abs(base.midY-a.frame.midY)<12 else{continue}
+            let target=base.offsetBy(dx:-gap,dy:0)
+            guard target.minX>=parent.bounds.minX-2 else{continue}
+            kept.insert(id);if v.frame != target {v.frame=target};peerShifts[id]=(v,base,target)
+        }
+        for id in Array(peerShifts.keys) where !kept.contains(id) {
+            if let e=peerShifts.removeValue(forKey:id),e.0.frame==e.2{e.0.frame=e.1}
+        }
+        if peers.contains(where:{$0 !== a && $0.superview===parent && visible($0) && $0.frame.intersects(frame.insetBy(dx:2,dy:2))}) {
+            restorePeers();restoreEditor();restoreOriginal(b);return
+        }
+        show(b,stack:stack,anchor:a,parent:parent,frame:frame)
     }
 }
 
@@ -377,7 +450,7 @@ private final class Coordinator: NSObject {
         NotificationCenter.default.addObserver(self,selector:#selector(schedule),name:UITextView.textDidChangeNotification,object:nil)
         let t=Timer(timeInterval:0.4,target:self,selector:#selector(tick),userInfo:nil,repeats:true)
         RunLoop.main.add(t,forMode:.common); timer=t
-        NSLog("[VGI5] Composer/history loaded; fingerprint=%d",nativeCompatible())
+        NSLog("[VGI6] Composer/history loaded; fingerprint=%d",nativeCompatible())
         schedule()
     }
     @objc func schedule() {
@@ -454,39 +527,69 @@ private final class Coordinator: NSObject {
             let all=descendants(w)
             if let c=findChat(w.rootViewController) { lastChat=c }
             let bars=all.filter{kind($0)==1 && visible($0)}
-            // Associate an accessory with its actual writable native input
-            // panel, never with unrelated controls in the same window.
-            let panels=all.compactMap { v -> (NSObject,UIView,UIView)? in
-                guard visible(v),let n=maybeNode(v),kind(n)==3,nativePanelWritable(ptr(n)) != 0,
-                      let clip=object(nativeClip(ptr(n))) as? UIView,visible(clip) else{return nil}
-                return (n,v,clip)
-            }
+            let accessories=all.filter{kind($0)==2 && visible($0)}
             for bar in bars {
                 guard let stack=descendants(bar,limit:80).compactMap({$0 as? UIStackView}).first,
-                      let b=stack.arrangedSubviews.compactMap({$0 as? UIButton}).first(where:{ ($0.configuration?.title?.hasPrefix("→")==true || $0.menu != nil) && $0.menu != nil }) else { continue }
+                      let b=stack.arrangedSubviews.compactMap({$0 as? UIButton}).first(where:{ ($0.configuration?.title?.hasPrefix("→")==true || $0.menu != nil) && $0.menu != nil }) else {continue}
                 let key=ObjectIdentifier(bar);seen.insert(key)
                 let placement=placements[key] ?? ComposerPlacement(bar);placements[key]=placement
                 let barRect=bar.convert(bar.bounds,to:w)
-                let barChat=nearestController(bar)
-                let eligible=panels.filter { _,host,clip in
-                    let rect=clip.convert(clip.bounds,to:w)
-                    return rect.width>=50 && abs(rect.maxY-barRect.midY)<180 &&
-                        (barChat==nil || nearestController(host)===barChat)
-                }
-                guard let (panel,host,clip)=eligible.min(by:{
-                    abs($0.2.convert($0.2.bounds,to:w).maxY-barRect.midY) < abs($1.2.convert($1.2.bounds,to:w).maxY-barRect.midY)
-                }) else {placement.noInput(b,stack:stack);continue}
-                let clipRect=clip.convert(clip.bounds,to:w)
-                let candidates=descendants(host,limit:700).filter{a in
-                    guard kind(a)==2,visible(a) else{return false}
+                // The V4 discovery path worked with this app's actual
+                // view tree. Do not require controller identity or a
+                // fully initialized private Swift field to recognize it.
+                var candidates=accessories.filter{a in
                     let r=a.convert(a.bounds,to:w)
-                    return r.height>=20 && r.height<=70 && abs(r.midY-clipRect.maxY)<70 &&
-                        nativeWidth(ptr(a))>=12
+                    return r.height>=20 && r.height<=70 && r.midX>w.bounds.midX && abs(r.midY-barRect.midY)<250
                 }
-                guard let anchor=candidates.max(by:{$0.convert($0.bounds,to:w).maxX < $1.convert($1.bounds,to:w).maxX}) else {
-                    placement.noInput(b,stack:stack);continue
+                let clips=all.filter{v in
+                    v.layer.name=="textInputNodeClippingContainer" && visible(v) &&
+                    v.bounds.width>=100 && abs(v.convert(v.bounds,to:w).midY-barRect.midY)<250
                 }
-                placement.place(b,stack:stack,anchor:anchor,panel:panel,clip:clip)
+                if candidates.isEmpty {
+                    for cl in clips {
+                        guard let par=cl.superview else{continue}
+                        candidates += par.subviews.filter{$0 is UIControl && visible($0) && $0.bounds.width>=18 && $0.bounds.width<=90 && $0.bounds.height>=20 && $0.bounds.height<=70 && $0.convert($0.bounds,to:w).midX>w.bounds.midX}
+                    }
+                }
+                guard let a=candidates.max(by:{$0.convert($0.bounds,to:w).maxX < $1.convert($1.bounds,to:w).maxX}),let parent=a.superview else {
+                    // No editable input surface in read-only channels.
+                    let hasEditor=all.contains {v in
+                        guard visible(v),v.bounds.width>=100,abs(v.convert(v.bounds,to:w).midY-barRect.midY)<250 else{return false}
+                        if let tv=v as? UITextView {return tv.isEditable}
+                        if kind(v)==11 || v.isFirstResponder {return true}
+                        if let n=maybeNode(v),kind(n)==3 {return nativePanelWritable(ptr(n)) != 0}
+                        return false
+                    }
+                    if clips.isEmpty && !hasEditor {placement.noInput(b,stack:stack)} else {placement.showOriginal(b)}
+                    continue
+                }
+                var view:UIView?=parent,panel:NSObject?
+                while let v=view {
+                    if let n=maybeNode(v),kind(n)==3 {panel=n;break}
+                    view=v.superview
+                }
+                let ar=a.convert(a.bounds,to:w)
+                if panel==nil {
+                    panel=all.compactMap{v->NSObject? in
+                        guard let n=maybeNode(v),kind(n)==3,visible(v) else{return nil}
+                        return abs(v.convert(v.bounds,to:w).maxY-ar.midY)<180 ? n:nil
+                    }.first
+                }
+                let clip=panel.flatMap{nodeView(object(nativeClip(ptr($0))))} ??
+                    clips.min(by:{abs($0.convert($0.bounds,to:w).midY-ar.midY)<abs($1.convert($1.bounds,to:w).midY-ar.midY)})
+                var editor=panel.flatMap{object(nativeEditor(ptr($0))) as? NSObject}
+                let local=clip.map{descendants($0,limit:500)} ?? all
+                if editor==nil {
+                    editor=local.compactMap{v->NSObject? in
+                        guard let n=maybeNode(v),kind(n)==10,abs(v.convert(v.bounds,to:w).midY-ar.midY)<140 else{return nil}
+                        return n
+                    }.first
+                }
+                let rich=local.first(where:{kind($0)==11 && visible($0)&&abs($0.convert($0.bounds,to:w).midY-ar.midY)<140})
+                // A disabled native panel is not writable; an exact native
+                // accessory/visible clip is stronger than incomplete metadata.
+                if clip==nil && kind(a) != 2 {placement.showOriginal(b);continue}
+                placement.place(b,stack:stack,anchor:a,panel:panel,clip:clip,editor:editor,rich:rich,peers:candidates)
             }
             if nativeCompatible() != 0 { history(w,all:all) }
         }
