@@ -1,0 +1,31 @@
+name: Build VoidGram Composer and History
+on:
+  push:
+    branches: [voidgram-composer-history]
+    paths:
+      - 'composer-history/**'
+      - '.github/workflows/build-composer-history.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build version-gated iOS arm64 dylib
+        run: |
+          set -euxo pipefail
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          mkdir -p out
+          xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=15.0 -isysroot "$SDK" -fPIC -c composer-history/Bridge.c -o out/Bridge.o
+          xcrun --sdk iphoneos swiftc -swift-version 5 -target arm64-apple-ios15.0 -sdk "$SDK" -O -emit-library -module-name VoidGramComposerHistory composer-history/ComposerHistory.swift out/Bridge.o -Xlinker -install_name -Xlinker @rpath/VoidGramComposerHistory.dylib -o out/VoidGramComposerHistory.dylib
+          codesign --force --sign - out/VoidGramComposerHistory.dylib
+          file out/VoidGramComposerHistory.dylib
+          otool -L out/VoidGramComposerHistory.dylib
+          shasum -a 256 out/VoidGramComposerHistory.dylib
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VoidGramComposerHistory-arm64
+          path: out/VoidGramComposerHistory.dylib
+          if-no-files-found: error
