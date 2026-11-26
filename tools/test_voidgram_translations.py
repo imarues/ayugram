@@ -42,6 +42,18 @@ required = (
     "Letters rise in a wave as words are sung",
     "Soft light follows the sung words",
     "Spring scrolling with blurred surrounding lines",
+    # 27.8.2: every English UI label reported in the eight screenshots.
+    "Settings rows", "Power saving", "Telegram Premium", "Stars", "TON",
+    "Telegram Business", "Send a gift", "Telegram Passport", "Apple Watch",
+    "Ask a question", "Telegram FAQ", "Telegram features", "Show all rows",
+    "Emoji status", "Profile color", "Set photo", "Add account", "My profile",
+    "Wallet", "Saved Messages", "Recent calls", "Devices", "Chat folders",
+    "Notifications and sounds", "Privacy and security", "Data and storage",
+    "Show ID", "ARCHIVED CHATS", "Sending Options", "Shadow ban", "default",
+    "Cloud builds are open to the Telegram IDs in the plugin repository's developers/ID: the source goes to the beta branch in your name, GitHub builds it, and the plugin is installed on this device only. Everyone else builds on a computer (SDKs and the `ayu` CLI in the VoidGram repository).",
+    "Add a note", "Set a nickname", "Name history (%@)", "DC4, Amsterdam, NL",
+    "Export chat / Saved Messages", "Lock with Face ID", "Hide chat",
+    "Pin in “📌 Pinned”", "Shorten (AI)",
 )
 missing = [key for key in required if key not in translations]
 if missing:
@@ -62,6 +74,8 @@ for action_key in (
     "Read receipts, typing and uploads are hidden in this chat. Online status is set separately.",
     "Delete My Messages", "Send as a video message", "Send as a voice message",
     "VoidGram · Copy Message IDs", "Send Logs", "Year in review",
+    "Shadow ban", "Export chat / Saved Messages", "Lock with Face ID",
+    "Hide chat", "Pin in “📌 Pinned”", "Shorten (AI)",
 ):
     if action_key not in external_map:
         raise SystemExit(f"Missing external chat UI action: {action_key}")
@@ -148,11 +162,29 @@ for external_guard in (
     "static NSString *AGTranslateYearReview(NSString *value)",
     "if (!match || match.range.location != 0) return nil;",
     "AGExternalExactText(value)",
-    "AGIsExternalActionView(obj)",
+    "AGIsExternalActionView(view)",
     "if (settings) visible = AGTranslate(value);",
 ):
     if external_guard not in source:
         raise SystemExit(f"Missing external UI isolation guard: {external_guard}")
+# The new external keys must not be applied by global string constructors;
+# profile counts and data-centre labels must stay inside real profile rows.
+for isolation in (
+    "if (outside.length && !AGScreenshotActionOnly(text)) return outside;",
+    "static NSString *AGScopedProfileNodeText",
+    'PeerInfoScreenActionItemNode',
+    "AGProfileActionText(value)",
+    "AGRefreshAttachedActionNode",
+    'NSSelectorFromString(@"didEnterHierarchy")',
+    "if (!externalCandidate && !profileCandidate) return value;",
+    "NSUInteger budget = 50;",
+):
+    if isolation not in source:
+        raise SystemExit(f"Screenshot localization safety guard missing: {isolation}")
+for profile_only in ("Add a note", "Set a nickname", "Name history (%@)", "DC4, Amsterdam, NL"):
+    if profile_only in external_map:
+        raise SystemExit(f"Profile-only string leaked into global action map: {profile_only}")
+assert translations["Name history (%@)"].count("%@") == 1
 header = ROOT / "src" / "generated_voidgram_ar.h"
 if not header.is_file():
     raise SystemExit("Generated translation header missing; run build script first")

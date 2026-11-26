@@ -2,10 +2,10 @@ name: Build VoidGram Arabic dylib
 
 on:
   push:
-    branches: [voidgram-arabic]
+    branches: [main, voidgram-arabic]
     paths:
       - 'src/VoidGramArabic.m'
-      - 'locales/voidgram-extra.json'
+      - 'locales/voidgram-*.json'
       - 'locales/ar-*.json'
       - 'tools/build_voidgram_translations.py'
       - 'tools/test_voidgram_translations.py'

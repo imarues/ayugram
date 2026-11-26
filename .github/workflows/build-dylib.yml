@@ -4,9 +4,10 @@ on:
   push:
     branches: [main]
     paths:
-      - 'src/**'
-      - 'locales/**'
-      - 'tools/**'
+      - 'src/AyuGram*.m'
+      - 'locales/ar-*.json'
+      - 'tools/build_translations.py'
+      - 'tools/audit_ipa.py'
       - '.github/workflows/build-dylib.yml'
   workflow_dispatch:
 

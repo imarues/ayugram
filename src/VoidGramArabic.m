@@ -101,7 +101,8 @@ static BOOL AGIsOnAyuPage(void) {
         if ([activeClass rangeOfString:@"ChatController"].location != NSNotFound ||
             [activeClass rangeOfString:@"ChatListController"].location != NSNotFound ||
             [activeClass rangeOfString:@"AccountController"].location != NSNotFound ||
-            [activeClass rangeOfString:@"PeerInfoController"].location != NSNotFound) continue;
+            [activeClass rangeOfString:@"PeerInfoController"].location != NSNotFound ||
+            [activeClass rangeOfString:@"PeerInfoScreen"].location != NSNotFound) continue;
         if (AGControllerIsWithinMarkedRoot(active)) return YES;
     }
     return NO;
@@ -202,6 +203,71 @@ static NSString *AGExternalExactText(NSString *text) {
     return review ?: text;
 }
 
+// These screenshot-reported labels are deliberately excluded from the
+// construction-time global map. They are translated only inside action rows.
+static BOOL AGScreenshotActionOnly(NSString *text) {
+    static NSSet<NSString *> *keys;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        keys = [NSSet setWithArray:@[@"Shadow ban", @"Shadow Ban",
+            @"Export chat / Saved Messages", @"Lock with Face ID", @"Unlock with Face ID",
+            @"Hide chat", @"Unhide chat", @"Pin in \"📌 Pinned\"", @"Shorten (AI)"]];
+    });
+    return [keys containsObject:AGCanonicalText(text)];
+}
+
+static BOOL AGIsProfileActionClass(NSString *name) {
+    return [name containsString:@"PeerInfoScreenActionItemNode"];
+}
+static BOOL AGIsProfileDCClass(NSString *name) {
+    return [name containsString:@"PeerInfoScreenLabeledValueItemNode"] ||
+           [name containsString:@"PeerInfoScreenInfoItemNode"];
+}
+static BOOL AGIsMenuActionClass(NSString *name) {
+    return [name containsString:@"ContextControllerActionsListActionItemNode"] ||
+           [name containsString:@"ContextActionNode"] ||
+           [name containsString:@"ContextMenuActionNode"] ||
+           [name containsString:@"ActionSheetButton"];
+}
+// Profile labels include a dynamically interpolated count. Keep the actual
+// number as rendered; never translate a profile name, biography or note body.
+static NSString *AGProfileActionText(NSString *text) {
+    if (!text.length || text.length > 96 || !AGArabicEnabled()) return text;
+    static NSSet<NSString *> *labels;
+    static NSRegularExpression *history;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        labels = [NSSet setWithArray:@[@"Add a note", @"Set a nickname",
+            @"Name history", @"Edit note", @"Edit nickname", @"Remove nickname"]];
+        history = [NSRegularExpression regularExpressionWithPattern:
+            @"^Name history \\(([0-9٠-٩۰-۹]+)\\)$" options:0 error:NULL];
+    });
+    if ([labels containsObject:text]) return AGMap()[text] ?: text;
+    if (![text hasPrefix:@"Name history ("]) return text;
+    NSTextCheckingResult *match = [history firstMatchInString:text options:0
+                                       range:NSMakeRange(0, text.length)];
+    if (!match || match.range.length != text.length) return text;
+    NSString *count = [text substringWithRange:[match rangeAtIndex:1]];
+    return [NSString stringWithFormat:AGMap()[@"Name history (%@)"] ?: @"سجل الأسماء (%@)", count];
+}
+static id AGNodeParent(id node) {
+    SEL sel = NSSelectorFromString(@"supernode");
+    return [node respondsToSelector:sel] ? ((id (*)(id, SEL))objc_msgSend)(node, sel) : nil;
+}
+static NSString *AGScopedProfileNodeText(id node, NSString *text) {
+    if (!node || !text.length || ![NSThread isMainThread] || !AGArabicEnabled()) return text;
+    NSString *profile = AGProfileActionText(text);
+    BOOL actionCandidate = ![profile isEqualToString:text];
+    BOOL dcCandidate = [text isEqualToString:@"DC4, Amsterdam, NL"];
+    if (!actionCandidate && !dcCandidate) return text;
+    for (NSUInteger depth = 0; depth < 15 && node; depth++, node = AGNodeParent(node)) {
+        NSString *name = NSStringFromClass([node class]);
+        if (actionCandidate && AGIsProfileActionClass(name)) return profile;
+        if (dcCandidate && AGIsProfileDCClass(name)) return AGMap()[text] ?: text;
+    }
+    return text;
+}
+
 static BOOL AGIsExternalActionNode(id node) {
     if (!node || ![NSThread isMainThread]) return NO;
     id current = node;
@@ -238,6 +304,30 @@ static BOOL AGIsExternalActionView(UIView *view) {
 }
 
 static NSString *AGTranslate(NSString *text);
+static NSString *AGScopedExternalNodeText(id node, NSString *value) {
+    if (!value.length || !AGArabicEnabled()) return value;
+    NSString *replacement = AGExternalExactText(value);
+    if (![replacement isEqualToString:value] && AGIsExternalActionNode(node)) return replacement;
+    return AGScopedProfileNodeText(node, value);
+}
+static NSString *AGScopedExternalViewText(UIView *view, NSString *value) {
+    if (!AGArabicEnabled() || !value.length || ![NSThread isMainThread]) return value;
+    NSString *replacement = AGExternalExactText(value);
+    BOOL externalCandidate = ![replacement isEqualToString:value];
+    if (externalCandidate && AGIsExternalActionView(view)) return replacement;
+    BOOL profileCandidate = ![AGProfileActionText(value) isEqualToString:value] ||
+        [value isEqualToString:@"DC4, Amsterdam, NL"];
+    if (!externalCandidate && !profileCandidate) return value;
+    // AsyncDisplayKit exposes the owning display node on the backing view.
+    SEL getter = NSSelectorFromString(@"asyncdisplaykit_node");
+    for (UIView *v = view; v; v = v.superview) {
+        if (![v respondsToSelector:getter]) continue;
+        id node = ((id (*)(id, SEL))objc_msgSend)(v, getter);
+        NSString *translated = AGScopedExternalNodeText(node, value);
+        if (![translated isEqualToString:value]) return translated;
+    }
+    return value;
+}
 static NSString *AGTranslateActionTitle(NSString *text) {
     if (AGIsOnAyuPage()) return AGTranslate(text);
     return AGExternalExactText(text);
@@ -249,8 +339,8 @@ static NSAttributedString *AGTranslateExternalActionAttributed(id node, NSAttrib
     if (![original isKindOfClass:NSAttributedString.class] || !original.length ||
         !AGArabicEnabled() || ![NSThread isMainThread]) return original;
     NSString *value = original.string;
-    NSString *replacement = AGExternalExactText(value);
-    if ([replacement isEqualToString:value] || !AGIsExternalActionNode(node)) return original;
+    NSString *replacement = AGScopedExternalNodeText(node, value);
+    if ([replacement isEqualToString:value]) return original;
     // Keep the original font/color/link attributes as far as possible.
     NSMutableAttributedString *copy = [original mutableCopy];
     [copy replaceCharactersInRange:NSMakeRange(0, copy.length) withString:replacement];
@@ -354,7 +444,7 @@ static NSString *AGTranslate(NSString *text) {
     // Never apply the large settings dictionary or substring replacement
     // outside the scoped VoidGram settings controller.
     NSString *outside = AGExternalUIMap()[text];
-    if (outside.length) return outside;
+    if (outside.length && !AGScreenshotActionOnly(text)) return outside;
     if ([text containsString:@" of them yours."] &&
         [text containsString:@"Most active:"]) {
         NSString *reviewText = AGTranslateYearReview(text);
@@ -505,8 +595,7 @@ static void AGUILabelText(UILabel *obj, SEL cmd, NSString *value) {
     // tree, which is hot for every ordinary Telegram message cell.
     NSString *visible = value;
     if (settings) visible = AGTranslate(value);
-    else if (value.length && AGExternalUIMap()[value] && AGIsExternalActionView(obj))
-        visible = AGExternalExactText(value);
+    else if (value.length) visible = AGScopedExternalViewText(obj, value);
     // Ghost Mode's status banner is an app-owned overlay, not a context action.
     // These uniquely identifying full sentences cannot be confused with a
     // generic Telegram menu item or partial user message.
@@ -519,8 +608,8 @@ static void AGUILabelAttr(UILabel *obj, SEL cmd, NSAttributedString *value) {
     AGCaptureFooterHeader(obj, value.string);
     NSAttributedString *translated = value;
     if (AGIsOnAyuPage()) translated = AGTranslateAttributed(value);
-    else if (value.length && AGIsExternalActionView(obj)) {
-        NSString *replacement = AGExternalExactText(value.string);
+    else if (value.length) {
+        NSString *replacement = AGScopedExternalViewText(obj, value.string);
         if (![replacement isEqualToString:value.string]) {
             NSMutableAttributedString *mutable = [value mutableCopy];
             [mutable replaceCharactersInRange:NSMakeRange(0, mutable.length)
@@ -563,8 +652,7 @@ static IMP origButtonTitle = NULL;
 static void AGButtonTitle(UIButton *obj, SEL cmd, NSString *value, UIControlState state) {
     NSString *visible = value;
     if (AGIsOnAyuPage()) visible = AGTranslate(value);
-    else if (value.length && AGExternalUIMap()[value] && AGIsExternalActionView(obj))
-        visible = AGExternalExactText(value);
+    else if (value.length) visible = AGScopedExternalViewText(obj, value);
     if (origButtonTitle)
         ((void (*)(id, SEL, NSString *, UIControlState))origButtonTitle)(obj, cmd, visible, state);
 }
@@ -572,8 +660,8 @@ static IMP origButtonAttr = NULL;
 static void AGButtonAttr(UIButton *obj, SEL cmd, NSAttributedString *value, UIControlState state) {
     NSAttributedString *visible = value;
     if (AGIsOnAyuPage()) visible = AGTranslateAttributed(value);
-    else if (value.length && AGIsExternalActionView(obj)) {
-        NSString *replacement = AGExternalExactText(value.string);
+    else if (value.length) {
+        NSString *replacement = AGScopedExternalViewText(obj, value.string);
         if (![replacement isEqualToString:value.string]) {
             NSMutableAttributedString *mutable = [value mutableCopy];
             [mutable replaceCharactersInRange:NSMakeRange(0, mutable.length)
@@ -601,7 +689,8 @@ static id AGAttributedInitAttrs(id obj, SEL cmd, NSString *value, NSDictionary *
 static IMP origASAttributed = NULL;
 static void AGASAttributed(id obj, SEL cmd, NSAttributedString *value) {
     AGCaptureFooterHeader(obj, value.string);
-    AG_CALL_VOID3(origASAttributed, obj, cmd, AGTranslateAttributed(value));
+    AG_CALL_VOID3(origASAttributed, obj, cmd, AGIsOnAyuPage() ?
+        AGTranslateAttributed(value) : AGTranslateExternalActionAttributed(obj, value));
 }
 static IMP origAlertFactory = NULL;
 static id AGAlertFactory(id cls, SEL cmd, NSString *title, NSString *msg, UIAlertControllerStyle style) {
@@ -814,7 +903,8 @@ static BOOL AGControllerIsWithinMarkedRoot(UIViewController *vc) {
         if ([name rangeOfString:@"ChatController"].location != NSNotFound ||
             [name rangeOfString:@"ChatListController"].location != NSNotFound ||
             [name rangeOfString:@"AccountController"].location != NSNotFound ||
-            [name rangeOfString:@"PeerInfoController"].location != NSNotFound) return NO;
+            [name rangeOfString:@"PeerInfoController"].location != NSNotFound ||
+            [name rangeOfString:@"PeerInfoScreen"].location != NSNotFound) return NO;
         if (objc_getAssociatedObject(vc, &AGRootMarker) ||
             objc_getAssociatedObject(vc, &AGChildMarker)) return YES;
         UINavigationController *nav = vc.navigationController;
@@ -893,7 +983,7 @@ static BOOL AGIsStockTelegramPage(UIViewController *vc) {
     NSString *name = NSStringFromClass(vc.class);
     for (NSString *known in @[
         @"ChatController", @"ChatListController", @"SettingsController",
-        @"AccountController", @"PeerInfoController", @"ContactsController",
+        @"AccountController", @"PeerInfoController", @"PeerInfoScreen", @"ContactsController",
         @"CallsController", @"GalleryController", @"PhotoViewerController"
     ]) {
         if ([name rangeOfString:known options:NSCaseInsensitiveSearch].location != NSNotFound)
@@ -945,6 +1035,44 @@ static NSString *AGVisibleTextFromObject(id obj) {
     if ([value isKindOfClass:NSString.class]) return value;
     if ([obj isKindOfClass:UILabel.class]) return ((UILabel *)obj).text;
     return nil;
+}
+
+static void AGRefreshAttachedActionNode(id node, id root, NSUInteger depth, NSUInteger *budget) {
+    if (!node || depth > 8 || !budget || !*budget) return;
+    --(*budget);
+    id raw = AGCallObjectGetter(node, @"attributedText");
+    if ([raw isKindOfClass:NSAttributedString.class] && [raw length] &&
+        [node respondsToSelector:@selector(setAttributedText:)]) {
+        NSString *text = [(NSAttributedString *)raw string];
+        NSString *replacement = AGScopedExternalNodeText(root, text);
+        if (replacement.length && ![replacement isEqualToString:text]) {
+            NSMutableAttributedString *copy = [raw mutableCopy];
+            [copy replaceCharactersInRange:NSMakeRange(0, copy.length) withString:replacement];
+            ((void (*)(id, SEL, id))objc_msgSend)(node, @selector(setAttributedText:), copy);
+        }
+    }
+    id children = AGCallObjectGetter(node, @"subnodes");
+    if ([children isKindOfClass:NSArray.class]) {
+        for (id child in (NSArray *)children) {
+            if (!*budget) break;
+            AGRefreshAttachedActionNode(child, root, depth + 1, budget);
+        }
+    }
+}
+static IMP origNodeDidEnterHierarchy = NULL;
+static void AGNodeDidEnterHierarchy(id obj, SEL cmd) {
+    if (origNodeDidEnterHierarchy) ((void (*)(id, SEL))origNodeDidEnterHierarchy)(obj, cmd);
+    if (![NSThread isMainThread]) return;
+    NSString *name = NSStringFromClass([obj class]);
+    if (!AGIsMenuActionClass(name) && !AGIsProfileActionClass(name) && !AGIsProfileDCClass(name)) return;
+    if (!AGArabicEnabled()) return;
+    __weak id weakNode = obj;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        id node = weakNode;
+        if (!node || !AGArabicEnabled()) return;
+        NSUInteger budget = 50;
+        AGRefreshAttachedActionNode(node, node, 0, &budget);
+    });
 }
 
 static BOOL AGIsRootFooterText(NSString *value) {
@@ -1293,6 +1421,11 @@ static void AGStart(void) {
         AGHookAttributedClusters();
         // Fix Telegram-specific custom TextNodes.
         AGHookTelegramTextNodes();
+        // Refresh only the verified profile/menu action nodes after attachment.
+        // No copy-constructor hooks, layout polling or whole-chat traversal.
+        Class displayNode = NSClassFromString(@"ASDisplayNode");
+        if (displayNode) AGHook(displayNode, NSSelectorFromString(@"didEnterHierarchy"),
+                                (IMP)AGNodeDidEnterHierarchy, &origNodeDidEnterHierarchy);
         // Temporary on-screen proof that the injector actually loaded this dylib.
         if ([[NSUserDefaults standardUserDefaults] boolForKey:@"VoidGramArabicDiagnostics"]) {
             AGInstallDiagnostics();
