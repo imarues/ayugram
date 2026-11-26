@@ -2,91 +2,99 @@ import UIKit
 import Foundation
 
 @_silgen_name("vgi_compatible") private func nativeCompatible() -> Int32
+@_silgen_name("vgi_kind") private func nativeKind(_ p: UnsafeMutableRawPointer) -> Int32
 @_silgen_name("vgi_width") private func nativeWidth(_ p: UnsafeMutableRawPointer) -> Double
 @_silgen_name("vgi_set_width") private func nativeSetWidth(_ p: UnsafeMutableRawPointer, _ expected: Double, _ value: Double) -> Int32
 @_silgen_name("vgi_relayout") private func nativeRelayout(_ p: UnsafeMutableRawPointer) -> Int32
-@_silgen_name("vgi_archive") private func nativeArchive(_ ctx: UnsafeMutableRawPointer, _ msg: UnsafeMutableRawPointer) -> UnsafeMutableRawPointer?
-private func ptr(_ object: AnyObject) -> UnsafeMutableRawPointer { Unmanaged.passUnretained(object).toOpaque() }
-private func typeName(_ o: AnyObject) -> String { NSStringFromClass(type(of: o)) }
-private func isType(_ o: AnyObject, _ suffix: String) -> Bool {
-    let n = typeName(o)
-    return n.hasSuffix("." + suffix) || (n.hasPrefix("_TtC") && n.hasSuffix(String(suffix.count) + suffix))
-}
-private func unwrap(_ v: Any) -> Any? {
-    let m = Mirror(reflecting: v)
-    if m.displayStyle == .optional { return m.children.first.flatMap { unwrap($0.value) } }
-    return v
-}
-private func member(_ v: Any, _ name: String) -> Any? {
-    var mirror: Mirror? = Mirror(reflecting: v)
-    while let m = mirror {
-        for c in m.children where c.label == name { return unwrap(c.value) }
-        mirror = m.superclassMirror
-    }
-    return nil
-}
-private func node(_ view: UIView) -> NSObject? {
-    let sel = NSSelectorFromString("asyncdisplaykit_node")
-    guard view.responds(to: sel) else { return nil }
-    return view.perform(sel)?.takeUnretainedValue() as? NSObject
-}
-private func nodeView(_ n: Any?) -> UIView? {
-    guard let ob = n as? NSObject else { return nil }
-    if let v = ob as? UIView { return v }
+@_silgen_name("vgi_clip") private func nativeClip(_ p: UnsafeMutableRawPointer) -> UnsafeMutableRawPointer?
+@_silgen_name("vgi_glyph") private func nativeGlyph(_ p: UnsafeMutableRawPointer, _ i: Int32) -> UnsafeMutableRawPointer?
+@_silgen_name("vgi_menu_message") private func nativeMessage(_ p: UnsafeMutableRawPointer) -> UnsafeMutableRawPointer?
+@_silgen_name("vgi_menu_chat") private func nativeChat(_ p: UnsafeMutableRawPointer) -> UnsafeMutableRawPointer?
+@_silgen_name("vgi_action_text") private func nativeActionText(_ p: UnsafeMutableRawPointer) -> UnsafeRawPointer?
+@_silgen_name("vgi_action_label") private func nativeActionLabel(_ p: UnsafeMutableRawPointer) -> UnsafeMutableRawPointer?
+@_silgen_name("vgi_archive") private func nativeArchive(_ p: UnsafeMutableRawPointer, _ m: UnsafeMutableRawPointer, _ c: UnsafeMutableRawPointer) -> UnsafeMutableRawPointer?
+@_silgen_name("vgi_install_hooks") private func nativeInstallHooks()
+@_silgen_name("vgi_node_for_view") private func nativeNode(_ p: UnsafeMutableRawPointer) -> UnsafeMutableRawPointer?
+
+private func ptr(_ o: AnyObject) -> UnsafeMutableRawPointer { Unmanaged.passUnretained(o).toOpaque() }
+private func object(_ p: UnsafeMutableRawPointer?) -> AnyObject? { p.map { Unmanaged<AnyObject>.fromOpaque($0).takeUnretainedValue() } }
+private func kind(_ o: AnyObject) -> Int32 { nativeKind(ptr(o)) }
+private func node(_ v: UIView) -> NSObject? { object(nativeNode(ptr(v))) as? NSObject }
+private func nodeView(_ o: AnyObject?) -> UIView? {
+    if let v = o as? UIView { return v }
+    guard let n = o as? NSObject else { return nil }
     let sel = NSSelectorFromString("view")
-    guard ob.responds(to: sel) else { return nil }
-    return ob.perform(sel)?.takeUnretainedValue() as? UIView
+    guard n.responds(to: sel) else { return nil }
+    return n.perform(sel)?.takeUnretainedValue() as? UIView
 }
 private func visible(_ v: UIView) -> Bool {
     guard v.window != nil, !v.bounds.isEmpty else { return false }
-    var w: UIView? = v
-    while let view = w { if view.isHidden || view.alpha < 0.05 { return false }; w = view.superview }
+    var p: UIView? = v
+    while let x = p { if x.isHidden || x.alpha < 0.01 { return false }; p = x.superview }
     return true
 }
-private func views(_ root: UIView, limit: Int = 4500) -> [UIView] {
-    var pending = [root], found = [UIView]()
-    while let v = pending.popLast(), found.count < limit {
-        found.append(v)
-        if !v.isHidden && v.alpha > 0.02 { pending.append(contentsOf: v.subviews) }
+private func descendants(_ root: UIView, limit: Int = 12000) -> [UIView] {
+    // Breadth-first: the chat composer and context menu are visited before an arbitrarily large message list.
+    var result = [root], index = 0
+    while index < result.count && result.count < limit {
+        let v = result[index]; index += 1
+        if !v.isHidden && v.alpha > 0.01 { result.append(contentsOf: v.subviews) }
     }
-    return found
+    return result
 }
+private func nearestController(_ v: UIView) -> UIViewController? {
+    var r: UIResponder? = v
+    while let x = r {
+        if let c = x as? UIViewController { return c }
+        r = x.next
+    }
+    return nil
+}
+private func findChat(_ root: UIViewController?, depth: Int = 0) -> UIViewController? {
+    guard let c = root, depth < 18 else { return nil }
+    if kind(c) == 7 { return c }
+    for child in c.children.reversed() { if let found = findChat(child, depth: depth+1), found.viewIfLoaded?.window != nil { return found } }
+    if let n = c as? UINavigationController { return findChat(n.visibleViewController, depth: depth+1) }
+    if let presented = c.presentedViewController { return findChat(presented, depth: depth+1) }
+    return nil
+}
+private func visibleController(_ root: UIViewController) -> UIViewController {
+    if let p = root.presentedViewController, !p.isBeingDismissed { return visibleController(p) }
+    if let n = root as? UINavigationController, let top = n.visibleViewController { return visibleController(top) }
+    return root
+}
+
 private final class TranslateButton: UIButton {
     weak var original: UIButton?
     let globe = UIImageView(image: UIImage(systemName: "globe"))
     let badge = UILabel()
     init() {
         super.init(frame: .zero)
-        backgroundColor = .clear
         accessibilityLabel = "ترجمة قبل الإرسال"
         accessibilityHint = "اضغط مطولاً لاختيار اللغة"
         showsMenuAsPrimaryAction = false
-        globe.contentMode = .scaleAspectFit
-        globe.isUserInteractionEnabled = false
+        backgroundColor = .clear
+        globe.contentMode = .scaleAspectFit; globe.isUserInteractionEnabled = false
         addSubview(globe)
         badge.font = .systemFont(ofSize: 8, weight: .semibold)
-        badge.textAlignment = .center
-        badge.textColor = .white
-        badge.backgroundColor = .systemBlue
-        badge.layer.cornerRadius = 4
-        badge.clipsToBounds = true
-        badge.isUserInteractionEnabled = false
+        badge.textAlignment = .center; badge.textColor = .white
+        badge.backgroundColor = .systemBlue; badge.layer.cornerRadius = 4
+        badge.clipsToBounds = true; badge.isUserInteractionEnabled = false
         addSubview(badge)
         addTarget(self, action: #selector(tapped), for: .touchUpInside)
     }
     required init?(coder: NSCoder) { nil }
     override func layoutSubviews() {
         super.layoutSubviews()
-        globe.frame = CGRect(x: 4, y: (bounds.height - 19) / 2 + 1, width: 19, height: 19)
-        badge.frame = CGRect(x: 15, y: max(1, (bounds.height - 19) / 2 - 4), width: 17, height: 11)
+        globe.frame = CGRect(x: 4, y: (bounds.height-20)/2+1, width: 20, height: 20)
+        badge.frame = CGRect(x: 15, y: max(1,(bounds.height-20)/2-3), width: 17, height: 11)
     }
     @objc private func tapped() { original?.sendActions(for: .touchUpInside) }
     func sync(_ b: UIButton, anchor: UIView) {
         original = b
         if menu !== b.menu { menu = b.menu }
         let code = UserDefaults.standard.string(forKey: "ayu.extra.translateTo") ?? "en"
-        badge.text = String(code.uppercased().prefix(3))
-        accessibilityValue = code.uppercased()
+        badge.text = String(code.uppercased().prefix(3)); accessibilityValue = code.uppercased()
         globe.tintColor = anchor.tintColor
     }
 }
@@ -94,220 +102,248 @@ private final class ComposerPlacement {
     weak var bar: UIView?
     weak var original: UIButton?
     weak var anchor: UIView?
-    weak var container: UIView?
     weak var panel: NSObject?
+    weak var clip: UIView?
     var baseWidth: Double = 0
-    var baseInteraction = true
-    var glyphs: [(UIView, CGAffineTransform)] = []
-    let proxy = TranslateButton()
-    init(bar: UIView) { self.bar = bar; baseInteraction = bar.isUserInteractionEnabled }
-    func restoreAnchor() {
-        for (v, transform) in glyphs { v.transform = transform }
-        if let a = anchor, baseWidth > 0 {
-            let restored = nativeSetWidth(ptr(a), baseWidth + 33, baseWidth)
-            if restored != 0, a.window != nil, let p = panel { _ = nativeRelayout(ptr(p)) }
+    var glyphs: [(UIView,CGAffineTransform)] = []
+    let button = TranslateButton()
+    private var insetViews = [(UITextView, UIEdgeInsets)]()
+    private var changedClip: (UIView, CGRect)?
+    let gap: CGFloat = 33
+    init(_ bar: UIView) { self.bar = bar }
+    private func restoreFallback() {
+        for (tv, old) in insetViews {
+            if abs(tv.textContainerInset.right-old.right-gap) < 1 { tv.textContainerInset = old }
         }
+        insetViews.removeAll()
+        if let (v, old) = changedClip, abs(v.frame.width-old.width+gap) < 1 { v.frame = old }
+        changedClip = nil
+    }
+    private func restoreAnchor() {
+        restoreFallback()
+        for (v, t) in glyphs { v.transform = t }
         glyphs.removeAll()
-        anchor = nil
-        baseWidth = 0
+        if let a = anchor, baseWidth > 0 {
+            let changed = nativeSetWidth(ptr(a), baseWidth+Double(gap), baseWidth)
+            if changed != 0, a.window != nil, let p = panel { _ = nativeRelayout(ptr(p)) }
+        }
+        anchor = nil; panel = nil; baseWidth = 0
     }
     func reset() {
         restoreAnchor()
-        original?.isHidden = false
-        bar?.isUserInteractionEnabled = baseInteraction
-        proxy.removeFromSuperview()
-        original = nil
+        original?.isHidden = false; original = nil
+        button.removeFromSuperview()
+        bar?.isUserInteractionEnabled = true
     }
-    func place(original b: UIButton, stack: UIStackView, anchor a: UIView, in parent: UIView, panel p: NSObject) {
+    func place(_ b: UIButton, stack: UIStackView, anchor a: UIView, parent: UIView, panel p: NSObject?, clip c: UIView?) {
         if original !== b { original?.isHidden = false; original = b }
         if anchor !== a {
             restoreAnchor()
+            self.anchor = a; self.panel = p; self.clip = c
             let width = nativeWidth(ptr(a))
-            guard width >= 16 && width <= 80, nativeSetWidth(ptr(a), width, width + 33) != 0 else { reset(); return }
-            baseWidth = width
-            anchor = a
-            container = parent
-            panel = p
-            // Native layout uses the width field for both editor insets and accessory positioning.
-            for name in ["iconImageView", "textView", "animationView", "tintMaskTextView", "tintMaskAnimationView"] {
-                if let v = nodeView(member(a, name)), v !== a {
-                    glyphs.append((v, v.transform))
+            if let p, width >= 12, width <= 90, nativeSetWidth(ptr(a), width, width+Double(gap)) != 0 {
+                baseWidth = width
+                for i: Int32 in [0,1,2,3,4] {
+                    if let v = nodeView(object(nativeGlyph(ptr(a),i))), v !== a { glyphs.append((v,v.transform)) }
                 }
+                _ = nativeRelayout(ptr(p))
             }
+        }
+        var reserved = baseWidth > 0 && abs(a.bounds.width-CGFloat(baseWidth)-gap)<3
+        if !reserved, baseWidth > 0, let p {
+            let width = nativeWidth(ptr(a))
+            if abs(width-baseWidth)<1 { _ = nativeSetWidth(ptr(a),width,width+Double(gap)) }
             _ = nativeRelayout(ptr(p))
+            reserved = abs(a.bounds.width-CGFloat(baseWidth)-gap)<3
         }
-        let width = nativeWidth(ptr(a))
-        if abs(width - baseWidth) < 0.1 {
-            for (v, transform) in glyphs { v.transform = transform }
-            if nativeSetWidth(ptr(a), width, width + 33) != 0 { _ = nativeRelayout(ptr(p)) }
-        }
-        if abs(a.frame.width - CGFloat(baseWidth + 33)) >= 2 { _ = nativeRelayout(ptr(p)) }
-        guard abs(a.frame.width - CGFloat(baseWidth + 33)) < 2 else {
-            proxy.removeFromSuperview(); b.isHidden = false; bar?.isUserInteractionEnabled = baseInteraction
-            return
-        }
-        // The native button's center moves left when its width expands. Keep its own icon in its original right-hand slot.
-        for (v, transform) in glyphs {
-            let f = v.frame
-            if abs(f.midX - a.bounds.midX) < 4 || v.transform != transform {
-                v.transform = transform.translatedBy(x: 16.5, y: 0)
+        if reserved {
+            restoreFallback()
+            for (v,t) in glyphs {
+                let center = v.center.x
+                if abs(center-a.bounds.midX)<5 || v.transform != t { v.transform = t.translatedBy(x: gap/2,y: 0) }
+            }
+        } else {
+            // Public UIKit fallback: reserve the text area's right inset instead of leaving the chip floating.
+            if let c, insetViews.isEmpty, changedClip == nil {
+                let editors = descendants(c, limit: 350).compactMap { $0 as? UITextView }
+                if editors.isEmpty, c.frame.width > 80 {
+                    changedClip = (c,c.frame); c.frame.size.width -= gap
+                } else {
+                    for tv in editors {
+                        let old = tv.textContainerInset; insetViews.append((tv,old))
+                        var new = old; new.right += gap; tv.textContainerInset = new
+                    }
+                }
+            } else if let (v, old) = changedClip, abs(v.frame.width-old.width)<2 { v.frame.size.width -= gap }
+            for (tv, old) in insetViews where abs(tv.textContainerInset.right-old.right)<1 {
+                var new = old; new.right += gap; tv.textContainerInset = new
             }
         }
-        if proxy.superview !== parent { proxy.removeFromSuperview(); parent.addSubview(proxy) }
-        proxy.frame = CGRect(x: a.frame.minX, y: a.frame.minY, width: 33, height: a.frame.height)
-        parent.bringSubviewToFront(proxy)
-        proxy.sync(b, anchor: a)
+        let frame = CGRect(x: a.frame.minX-(reserved ? 0 : gap), y: a.frame.minY, width: gap, height: a.frame.height)
+        guard frame.minX >= parent.bounds.minX-2, frame.height > 15 else { return }
+        if button.superview !== parent { button.removeFromSuperview(); parent.addSubview(button) }
+        button.frame = frame; parent.bringSubviewToFront(button)
+        button.sync(b,anchor:a)
         b.isHidden = true
-        if stack.arrangedSubviews.allSatisfy({ $0.isHidden }) { bar?.isUserInteractionEnabled = false }
-        else { bar?.isUserInteractionEnabled = baseInteraction }
+        bar?.isUserInteractionEnabled = !stack.arrangedSubviews.allSatisfy { $0.isHidden }
     }
-    deinit { reset() }
+}
+
+private final class ArchiveContainer: UIViewController {
+    let archive: UIViewController
+    init(_ a: UIViewController) { archive = a; super.init(nibName:nil,bundle:nil) }
+    required init?(coder: NSCoder) { nil }
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .systemBackground
+        let close = UIButton(type: .system); close.setTitle("إغلاق",for:.normal); close.addTarget(self,action:#selector(done),for:.touchUpInside)
+        close.translatesAutoresizingMaskIntoConstraints=false
+        addChild(archive); archive.view.translatesAutoresizingMaskIntoConstraints=false
+        view.addSubview(archive.view); view.addSubview(close); archive.didMove(toParent:self)
+        NSLayoutConstraint.activate([
+            close.trailingAnchor.constraint(equalTo:view.trailingAnchor,constant:-20),
+            close.topAnchor.constraint(equalTo:view.safeAreaLayoutGuide.topAnchor),
+            close.heightAnchor.constraint(equalToConstant:36),
+            archive.view.topAnchor.constraint(equalTo:close.bottomAnchor),
+            archive.view.bottomAnchor.constraint(equalTo:view.bottomAnchor),
+            archive.view.leadingAnchor.constraint(equalTo:view.leadingAnchor),
+            archive.view.trailingAnchor.constraint(equalTo:view.trailingAnchor)
+        ])
+    }
+    @objc private func done() { dismiss(animated:true) }
 }
 private final class HistoryAction: UIView {
     weak var presentation: NSObject?
     weak var chat: UIViewController?
-    weak var message: AnyObject?
     weak var nativeText: UIView?
-    let label = UILabel()
-    let detail = UILabel()
-    init(presentation: NSObject, chat: UIViewController, message: AnyObject, nativeText: UIView?, time: String, color: UIColor) {
-        self.presentation = presentation; self.chat = chat; self.message = message; self.nativeText = nativeText
-        super.init(frame: .zero)
-        isAccessibilityElement = true
-        accessibilityTraits = .button
-        accessibilityLabel = "سجل التعديلات"
-        accessibilityHint = "عرض النسخ المحفوظة من هذه الرسالة"
-        UIView.performWithoutAnimation { nativeText?.alpha = 0 }
-        label.text = "سجل التعديلات"
-        label.font = .systemFont(ofSize: 16, weight: .medium)
-        label.textColor = color
-        detail.text = time
-        detail.textColor = color.withAlphaComponent(0.7)
-        detail.font = .systemFont(ofSize: 11)
-        detail.adjustsFontSizeToFitWidth = true
-        detail.minimumScaleFactor = 0.75
-        for l in [label, detail] { l.isUserInteractionEnabled = false; l.textAlignment = .natural; addSubview(l) }
-        let tap = UITapGestureRecognizer(target: self, action: #selector(open(_:)))
-        addGestureRecognizer(tap)
+    weak var root: UIViewController?
+    let label = UILabel(), detail = UILabel()
+    init(presentation: NSObject, chat: UIViewController?, root: UIViewController?, nativeText: UIView?, time: String, color: UIColor) {
+        self.presentation=presentation; self.chat=chat; self.root=root; self.nativeText=nativeText
+        super.init(frame:.zero)
+        accessibilityLabel="سجل التعديلات"; isAccessibilityElement=true; accessibilityTraits = .button
+        nativeText?.alpha=0
+        label.text="سجل التعديلات"; label.textColor=color; label.font = .systemFont(ofSize:16,weight:.medium)
+        detail.text=time; detail.textColor=color.withAlphaComponent(0.72); detail.font = .systemFont(ofSize:11)
+        detail.adjustsFontSizeToFitWidth=true; detail.minimumScaleFactor=0.65
+        for l in [label,detail] { l.isUserInteractionEnabled=false; l.textAlignment = .natural; addSubview(l) }
+        addGestureRecognizer(UITapGestureRecognizer(target:self,action:#selector(open(_:))))
     }
     required init?(coder: NSCoder) { nil }
     override func layoutSubviews() {
         super.layoutSubviews()
-        label.frame = CGRect(x: 0, y: max(0, (bounds.height-36)/2), width: bounds.width, height: 20)
-        detail.frame = CGRect(x: 0, y: label.frame.maxY, width: bounds.width, height: 15)
+        label.frame=CGRect(x:0,y:max(0,(bounds.height-35)/2),width:bounds.width,height:20)
+        detail.frame=CGRect(x:0,y:label.frame.maxY,width:bounds.width,height:15)
     }
     @objc private func open(_ gesture: UITapGestureRecognizer) {
-        guard gesture.state == .ended, let p = presentation, let m = message, let chat = chat,
-              let nav = chat.navigationController,
-              let raw = nativeArchive(ptr(p), ptr(m)) else { return }
-        let obj = Unmanaged<AnyObject>.fromOpaque(raw).takeRetainedValue()
-        guard let archive = obj as? UIViewController else { return }
-        let selector = NSSelectorFromString("dismissTapGesture:")
-        guard p.responds(to: selector) else { return }
-        _ = p.perform(selector, with: gesture)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak nav] in
-            nav?.pushViewController(archive, animated: true)
+        guard gesture.state == .ended, let p=presentation else { return }
+        let chat = self.chat ?? root.flatMap { findChat($0) }
+        guard let m=nativeMessage(ptr(p)), let chat, let raw=nativeArchive(ptr(p),m,ptr(chat)) else {
+            let presenter = root.map(visibleController) ?? chat
+            if let presenter {
+                let a=UIAlertController(title:"سجل التعديلات",message:"تعذر الوصول إلى السجل المحلي لهذه الرسالة.",preferredStyle:.alert)
+                a.addAction(UIAlertAction(title:"حسناً",style:.default)); presenter.present(a,animated:true)
+            }
+            return
+        }
+        guard let archive = Unmanaged<AnyObject>.fromOpaque(raw).takeRetainedValue() as? UIViewController else { return }
+        let sel=NSSelectorFromString("dismissTapGesture:")
+        if p.responds(to:sel) { _ = p.perform(sel,with:gesture) }
+        DispatchQueue.main.asyncAfter(deadline:.now()+0.46) { [weak chat, weak root=self.root] in
+            guard let presenter = root.map(visibleController) ?? chat else { return }
+            let container=ArchiveContainer(archive); container.modalPresentationStyle = .pageSheet
+            presenter.present(container,animated:true)
         }
     }
-    deinit { nativeText?.alpha = 1 }
 }
+
 private final class Coordinator: NSObject {
-    static let shared = Coordinator()
-    private var placements = [ObjectIdentifier: ComposerPlacement]()
-    private var timer: Timer?
-    private weak var lastChat: UIViewController?
+    static let shared=Coordinator()
+    var placements=[ObjectIdentifier:ComposerPlacement]()
+    var timer: Timer?
+    var pending=false, scanning=false
+    weak var lastChat: UIViewController?
     func begin() {
-        guard timer == nil else { return }
-        let t = Timer(timeInterval: 0.23, target: self, selector: #selector(tick), userInfo: nil, repeats: true)
-        RunLoop.main.add(t, forMode: .common)
-        timer = t
+        guard timer==nil else { return }
+        nativeInstallHooks()
+        NotificationCenter.default.addObserver(self,selector:#selector(schedule),name:UIApplication.didBecomeActiveNotification,object:nil)
+        NotificationCenter.default.addObserver(self,selector:#selector(schedule),name:UIWindow.didBecomeVisibleNotification,object:nil)
+        let t=Timer(timeInterval:0.4,target:self,selector:#selector(tick),userInfo:nil,repeats:true)
+        RunLoop.main.add(t,forMode:.common); timer=t
+        NSLog("[VGI2] Composer/history loaded; fingerprint=%d",nativeCompatible())
+        schedule()
     }
-    private func sourceObject(_ value: Any, depth: Int = 0) -> AnyObject? {
-        guard depth <= 3 else { return nil }
-        let m = Mirror(reflecting: value)
-        if m.displayStyle == .class {
-            let o = value as AnyObject
-            return isType(o, "ChatMessageContextExtractedContentSource") ? o : nil
-        }
-        guard m.displayStyle == .enum || m.displayStyle == .optional || m.displayStyle == .tuple else { return nil }
-        for c in m.children { if let found = sourceObject(c.value, depth: depth + 1) { return found } }
-        return nil
+    @objc func schedule() {
+        guard !pending else { return }; pending=true
+        DispatchQueue.main.async { [weak self] in self?.pending=false; self?.tick() }
     }
-    private func isEditTime(_ text: String) -> Bool {
-        let s = text.lowercased()
-        return s.contains("تم تعديل") || s.contains("عُدّلت") || s.contains("edited ") || s.contains("изменено") || s.contains("відредаговано")
+    private func isTime(_ s: String) -> Bool {
+        let t=s.lowercased()
+        return t.contains("تم تعديل")||t.contains("عُدّلت")||t.contains("معدّل")||t.contains("معدلة")||t.contains("edited ")||t.contains("изменено")||t.contains("відредаговано")
     }
-    private func installHistory(_ p: NSObject, view: UIView) {
-        guard let sourceEnum = member(p, "source"), let source = sourceObject(sourceEnum),
-              let messageValue = member(source, "message"), isType(messageValue as AnyObject, "Message"),
-              let chat = (member(source, "chatController") as? UIViewController) ?? lastChat,
-              chat.navigationController != nil else { return }
-        let message = messageValue as AnyObject
-        for v in views(view, limit: 1800) {
-            guard let action = node(v) else { continue }
-            let compact = isType(action, "ContextActionNode")
-            guard compact || isType(action, "ContextControllerActionsListActionItemNode") else { continue }
-            guard let item = member(action, compact ? "action" : "item"),
-                  let text = member(item, "text") as? String, isEditTime(text),
-                  let tv = nodeView(member(action, compact ? "textNode" : "titleLabelNode")) else { continue }
-            if let old = v.subviews.first(where: { $0 is HistoryAction }) as? HistoryAction {
-                old.frame = CGRect(x: tv.frame.minX, y: 0, width: max(0, v.bounds.width-tv.frame.minX-10), height: v.bounds.height)
-                old.nativeText?.alpha = 0
-                continue
-            }
-            guard tv.frame.width > 10, v.bounds.height >= 30 else { continue }
-            let color: UIColor
-            if let attributed = member(member(action, compact ? "textNode" : "titleLabelNode") ?? action, "attributedText") as? NSAttributedString,
-               attributed.length > 0, let c = attributed.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? UIColor { color = c }
-            else { color = v.traitCollection.userInterfaceStyle == .dark ? .white : .label }
-            let overlay = HistoryAction(presentation: p, chat: chat, message: message, nativeText: tv, time: text, color: color)
-            overlay.frame = CGRect(x: tv.frame.minX, y: 0, width: max(0, v.bounds.width-tv.frame.minX-10), height: v.bounds.height)
-            overlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-            v.addSubview(overlay)
+    private func history(_ menu: NSObject, menuView: UIView, w: UIWindow) {
+        let chat: UIViewController?
+        if let raw=nativeChat(ptr(menu)) { chat=Unmanaged<AnyObject>.fromOpaque(raw).takeRetainedValue() as? UIViewController }
+        else { chat=findChat(w.rootViewController) ?? lastChat }
+        for v in descendants(menuView,limit:3200) {
+            guard let n=node(v), kind(n)==5||kind(n)==6 else { continue }
+            guard let s=nativeActionText(ptr(n)) else { continue }
+            let text=s.assumingMemoryBound(to:String.self).pointee
+            guard isTime(text),v.bounds.height>=28 else { continue }
+            let tv=nodeView(object(nativeActionLabel(ptr(n))))
+            let labelFrame=tv.map { $0.convert($0.bounds,to:v) }
+            let start=max(16,min(v.bounds.width-90,labelFrame?.minX ?? 50))
+            let frame=CGRect(x:start,y:0,width:max(0,v.bounds.width-start-8),height:v.bounds.height)
+            if let old=v.subviews.first(where:{$0 is HistoryAction}) as? HistoryAction { old.frame=frame; tv?.alpha=0; continue }
+            let color: UIColor = v.traitCollection.userInterfaceStyle == .dark ? .white : .label
+            let overlay=HistoryAction(presentation:menu,chat:chat,root:w.rootViewController,nativeText:tv,time:text,color:color)
+            overlay.frame=frame; v.addSubview(overlay); v.bringSubviewToFront(overlay)
         }
     }
-    @objc private func tick() {
-        guard UIApplication.shared.applicationState == .active, nativeCompatible() != 0 else { return }
-        let windows = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.filter { $0.activationState == .foregroundActive }.flatMap { $0.windows }
-        var seen = Set<ObjectIdentifier>()
-        for w in windows where !w.isHidden {
-            let all = views(w)
-            for v in all where isType(v, "AyuComposerBar") && visible(v) {
-                if let chat = member(v, "controller") as? UIViewController { lastChat = chat }
-                guard let stack = member(v, "stack") as? UIStackView,
-                      let b = stack.arrangedSubviews.compactMap({ $0 as? UIButton }).first(where: { $0.configuration?.title?.hasPrefix("→ ") == true && $0.menu != nil }),
-                      let chat = member(v, "controller") as? UIViewController, let root = chat.viewIfLoaded else { continue }
-                // Only native composer accessory buttons; do not attach in a gallery, search or unrelated text field.
-                let accessories = views(root).filter { isType($0, "AccessoryItemIconButton") && visible($0) && $0.bounds.height >= 25 && $0.bounds.height <= 65 }
-                let emoji = accessories.filter { candidate in
-                    guard let item = member(candidate, "item") else { return false }
-                    return Mirror(reflecting: item).children.first?.label == "input" || String(describing: item).hasPrefix("input(")
+    @objc func tick() {
+        guard !scanning else { return }; scanning=true; defer { scanning=false }
+        // Telegram and sideloaded variants may use windows outside foreground scenes. Never gate the feature on one scene state.
+        nativeInstallHooks()
+        let app=UIApplication.shared
+        guard app.applicationState != .background else { return }
+        var windows=app.windows
+        windows += app.connectedScenes.compactMap{$0 as? UIWindowScene}.flatMap{$0.windows}
+        var seenWindows=Set<ObjectIdentifier>(), seen=Set<ObjectIdentifier>()
+        for w in windows where !w.isHidden && w.alpha>0.01 && seenWindows.insert(ObjectIdentifier(w)).inserted {
+            let all=descendants(w)
+            if let c=findChat(w.rootViewController) { lastChat=c }
+            let bars=all.filter{kind($0)==1 && visible($0)}
+            let accessories=all.filter{kind($0)==2 && visible($0)}
+            for bar in bars {
+                guard let stack=descendants(bar,limit:80).compactMap({$0 as? UIStackView}).first,
+                      let b=stack.arrangedSubviews.compactMap({$0 as? UIButton}).first(where:{ ($0.configuration?.title?.hasPrefix("→")==true || $0.menu != nil) && $0.menu != nil }) else { continue }
+                let barRect=bar.convert(bar.bounds,to:w)
+                var candidates=accessories.filter { a in
+                    let r=a.convert(a.bounds,to:w)
+                    return r.height>=20 && r.height<=70 && abs(r.midY-barRect.midY)<250
                 }
-                let candidates = emoji.isEmpty ? accessories : emoji
-                guard let a = candidates.min(by: { $0.convert($0.bounds, to: root).minX < $1.convert($1.bounds, to: root).minX }), let parent = a.superview,
-                      parent.subviews.contains(where: { $0.layer.name == "textInputNodeClippingContainer" }) else { continue }
-                var ancestor: UIView? = parent
-                var panel: NSObject?
-                while let v = ancestor {
-                    if let n = node(v), isType(n, "ChatTextInputPanelNode") { panel = n; break }
-                    ancestor = v.superview
+                if candidates.isEmpty {
+                    for cl in all where cl.layer.name=="textInputNodeClippingContainer" && visible(cl) {
+                        let r=cl.convert(cl.bounds,to:w)
+                        guard abs(r.midY-barRect.midY)<250, let par=cl.superview else { continue }
+                        candidates += par.subviews.filter { $0 is UIControl && visible($0) && $0.bounds.width>=18 && $0.bounds.width<=75 && $0.bounds.height>=20 && $0.bounds.height<=70 }
+                    }
                 }
-                guard let panel else { continue }
-                let key = ObjectIdentifier(v)
-                let placement = placements[key] ?? ComposerPlacement(bar: v)
-                placements[key] = placement
-                seen.insert(key)
-                placement.place(original: b, stack: stack, anchor: a, in: parent, panel: panel)
+                // Native input accessory is rightmost for conventional chat composer. The sibling controls stay intact.
+                guard let a=candidates.max(by:{ $0.convert($0.bounds,to:w).midX < $1.convert($1.bounds,to:w).midX }), let parent=a.superview else { continue }
+                var view: UIView?=parent, panel: NSObject?
+                while let v=view { if let n=node(v), kind(n)==3 { panel=n; break }; view=v.superview }
+                let clip = panel.flatMap { object(nativeClip(ptr($0))) as? UIView } ?? parent.subviews.first(where:{$0.layer.name=="textInputNodeClippingContainer"})
+                let key=ObjectIdentifier(bar); seen.insert(key)
+                let placement=placements[key] ?? ComposerPlacement(bar); placements[key]=placement
+                placement.place(b,stack:stack,anchor:a,parent:parent,panel:panel,clip:clip)
             }
-            for v in all {
-                if let p = node(v), isType(p, "ContextControllerExtractedPresentationNode") { installHistory(p, view: v) }
+            if nativeCompatible() != 0 {
+                for v in all { if let n=node(v),kind(n)==4 { history(n,menuView:v,w:w) } }
             }
         }
-        for key in Array(placements.keys) where !seen.contains(key) {
-            placements.removeValue(forKey: key)?.reset()
-        }
+        for k in Array(placements.keys) where !seen.contains(k) { placements.removeValue(forKey:k)?.reset() }
     }
 }
-@_cdecl("vgi_start") public func vgiStart() {
-    DispatchQueue.main.async { Coordinator.shared.begin() }
-}
+@_cdecl("vgi_views_changed") public func vgiViewsChanged() { DispatchQueue.main.async { Coordinator.shared.schedule() } }
+@_cdecl("vgi_start") public func vgiStart() { DispatchQueue.main.async { Coordinator.shared.begin() } }

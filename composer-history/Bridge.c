@@ -5,6 +5,7 @@
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
 #include <dispatch/dispatch.h>
+#include <dlfcn.h>
 
 extern void vgi_start(void);
 static const uint8_t ui_uuid[16]={0x19,0xf6,0xe4,0xbf,0x5a,0x19,0x3d,0x56,0x9c,0x86,0xa0,0xa1,0xad,0xa2,0x4a,0x52};
@@ -26,12 +27,27 @@ static const struct mach_header_64 *image(const char *suffix,const uint8_t *uuid
     }
     return 0;
 }
-static const struct mach_header_64 *ui(void){return image("/TelegramUIFramework",ui_uuid);}
-int vgi_compatible(void){return ui()!=0&&image("/PostboxFramework",pb_uuid)!=0;}
+static const struct mach_header_64 *ui(void){static const struct mach_header_64 *h=0;if(!h)h=image("/TelegramUIFramework",ui_uuid);return h;}
+static const struct mach_header_64 *pb(void){static const struct mach_header_64 *h=0;if(!h)h=image("/PostboxFramework",pb_uuid);return h;}
+int vgi_compatible(void){return ui()!=0&&pb()!=0;}
 static Class exact_class(void *obj,const char *name){
     if(!obj)return Nil;
-    Class c=object_getClass((id)obj), expected=objc_lookUpClass(name);
-    return expected&&c==expected?c:Nil;
+    Class c=object_getClass((id)obj);
+    if(!c)return Nil;
+    const char *actual=class_getName(c);
+    Class expected=objc_lookUpClass(name);
+    if((expected&&c==expected)||(actual&&!strcmp(actual,name)))return c;
+    // Swift's Objective-C names may be returned in demangled module.name form.
+    if(actual&&name[0]=='_'&&name[1]=='T'&&strchr(actual,'.')){
+        const char *tail=strrchr(actual,'.')+1;
+        size_t l=strlen(tail),n=strlen(name);
+        if(n>=l&&!strcmp(name+n-l,tail)){
+            const char *p=name+4; size_t module_len=0;
+            while(*p>='0'&&*p<='9'){module_len=module_len*10+(size_t)(*p-'0');p++;}
+            if(module_len==(size_t)(strchr(actual,'.')-actual)&&!memcmp(p,actual,module_len))return c;
+        }
+    }
+    return Nil;
 }
 // Swift's class metadata field-offset vector contains byte offsets, one word each.
 // Both UUID and exact runtime class must match before accessing a private field.
@@ -42,6 +58,75 @@ static void *field(void *obj,const char *name,size_t vector,size_t index,size_t 
     if(off<sizeof(void *)||off>size||bytes>size-off)return NULL;
     return (char*)obj+off;
 }
+// Exact names rather than Swift Mirror: the UIKit object is the source of truth.
+int vgi_kind(void *obj){
+    if(!obj)return 0;
+    Class c=object_getClass((id)obj);
+    if(!c)return 0;
+    static const char *names[]={
+        "_TtC10TelegramUI14AyuComposerBar",
+        "_TtC22ChatTextInputPanelNode23AccessoryItemIconButton",
+        "_TtC22ChatTextInputPanelNode22ChatTextInputPanelNode",
+        "_TtC21ContextControllerImpl42ContextControllerExtractedPresentationNode",
+        "_TtC21ContextControllerImpl17ContextActionNode",
+        "_TtC21ContextControllerImpl42ContextControllerActionsListActionItemNode",
+        "_TtC10TelegramUI18ChatControllerImpl"
+    };
+    static Class known[7]={0};
+    for(int i=0;i<7;i++)if(known[i]==c)return i+1;
+    const char *n=class_getName(c);
+    if(!n||((n[0]!='_'||n[1]!='T')&&!strchr(n,'.')))return 0;
+    for(int i=0;i<7;i++)if(exact_class(obj,names[i])){known[i]=c;return i+1;}
+    return 0;
+}
+static void *read_object(void *obj,const char *name,size_t vec,size_t i){
+    void **p=field(obj,name,vec,i,sizeof(void*));
+    return p?*p:0;
+}
+void *vgi_clip(void *panel){
+    if(!ui())return 0;
+    return read_object(panel,"_TtC22ChatTextInputPanelNode22ChatTextInputPanelNode",0x23,7);
+}
+void *vgi_glyph(void *accessory,int i){
+    if(!ui()||i<0||i>4)return 0;
+    return read_object(accessory,"_TtC22ChatTextInputPanelNode23AccessoryItemIconButton",0x16,4+i);
+}
+void *vgi_menu_source(void *presentation){
+    if(!ui())return 0;
+    uintptr_t *s=field(presentation,"_TtC21ContextControllerImpl42ContextControllerExtractedPresentationNode",0xa,8,16);
+    // Native call sites encode .extracted in the witness word, not the object pointer.
+    if(!s||!s[0]||(s[1]&0xc000000000000000ULL)!=0x8000000000000000ULL)return 0;
+    void *obj=(void*)s[0];
+    return exact_class(obj,"_TtC10TelegramUI40ChatMessageContextExtractedContentSource")?obj:0;
+}
+void *vgi_menu_message(void *presentation){
+    void *source=vgi_menu_source(presentation);
+    return source?read_object(source,"_TtC10TelegramUI40ChatMessageContextExtractedContentSource",0xa,8):0;
+}
+void *vgi_menu_chat(void *presentation){
+    void *source=vgi_menu_source(presentation);
+    if(!source)return 0;
+    void *storage=field(source,"_TtC10TelegramUI40ChatMessageContextExtractedContentSource",0xa,5,sizeof(void*));
+    if(!storage)return 0;
+    typedef void*(*weakload)(void*);
+    weakload load=(weakload)dlsym(RTLD_DEFAULT,"swift_unknownObjectWeakLoadStrong");
+    return load?load(storage):0; // retained
+}
+void *vgi_action_text(void *row){
+    if(!ui())return 0;
+    void *item=0;
+    int kind=vgi_kind(row);
+    if(kind==5)item=read_object(row,"_TtC21ContextControllerImpl17ContextActionNode",0xa,1);
+    else if(kind==6)item=read_object(row,"_TtC21ContextControllerImpl42ContextControllerActionsListActionItemNode",0x4a,4);
+    return field(item,"_TtC9ContextUI21ContextMenuActionItem",0xa,1,16);
+}
+void *vgi_action_label(void *row){
+    if(!ui())return 0;
+    int kind=vgi_kind(row);
+    if(kind==5)return read_object(row,"_TtC21ContextControllerImpl17ContextActionNode",0xa,8);
+    if(kind==6)return read_object(row,"_TtC21ContextControllerImpl42ContextControllerActionsListActionItemNode",0x4a,5);
+    return 0;
+}
 static double *accessory_width(void *obj){
     if(!ui())return NULL;
     return field(obj,"_TtC22ChatTextInputPanelNode23AccessoryItemIconButton",0x16,3,sizeof(double));
@@ -49,7 +134,7 @@ static double *accessory_width(void *obj){
 double vgi_width(void *obj){double *p=accessory_width(obj);return p?*p:0;}
 int vgi_set_width(void *obj,double expected,double value){
     double *p=accessory_width(obj);
-    if(!p||*p!=expected||!(expected>=16&&expected<=120)||!(value>=16&&value<=120))return 0;
+    if(!p||*p!=expected||!(expected>=12&&expected<=125)||!(value>=12&&value<=125))return 0;
     *p=value;return 1;
 }
 // A verified call site passes ContainedViewLayoutTransition.immediate in an
@@ -78,8 +163,8 @@ int vgi_relayout(void *panel){
     vgi_layout_call(transition,panel,(void*)(base+0x29c3eec));
     return 1;
 }
-void *vgi_archive(void *presentation,void *message){
-    const struct mach_header_64 *h=ui(); if(!h||!image("/PostboxFramework",pb_uuid))return NULL;
+void *vgi_archive(void *presentation,void *message,void *chat){
+    const struct mach_header_64 *h=ui(); if(!h||!pb())return NULL;
     const uint8_t *base=(const void*)h;
     // Exact implementation fingerprint: frame prologue, allocation call, storing the 24-byte ID and optional tag.
     if(*(const uint32_t*)(base+0xd85104)!=0xa9bb67fa||
@@ -88,6 +173,7 @@ void *vgi_archive(void *presentation,void *message){
        *(const uint32_t*)(base+0xd8544c)!=0xf9000917||
        *(const uint32_t*)(base+0xd85450)!=0x39006116)return NULL;
     uintptr_t *ctx=field(presentation,"_TtC21ContextControllerImpl42ContextControllerExtractedPresentationNode",0xa,2,16);
+    if(!ctx||!ctx[0]||!ctx[1])ctx=field(chat,"_TtC10TelegramUI18ChatControllerImpl",0x115,8,16);
     uintptr_t *mid=field(message,"_TtC7Postbox7Message",0xa,2,24);
     if(!ctx||!ctx[0]||!ctx[1]||!mid)return NULL;
     uintptr_t args[3]; memcpy(args,mid,24);
@@ -95,6 +181,41 @@ void *vgi_archive(void *presentation,void *message){
     if((uint32_t)args[2]!=0||(int32_t)(args[2]>>32)<=0)return NULL;
     typedef void*(*archive_fn)(uintptr_t,uintptr_t,uintptr_t,uintptr_t,uintptr_t,uintptr_t);
     return ((archive_fn)(base+0xd85104))(ctx[0],ctx[1],args[0],args[1],args[2],0);
+}
+extern void vgi_views_changed(void);
+static IMP bar_original=0, accessory_original=0, display_original=0;
+static void bar_moved(id self, SEL cmd){if(bar_original)((void(*)(id,SEL))bar_original)(self,cmd); vgi_views_changed();}
+static void accessory_moved(id self, SEL cmd){if(accessory_original)((void(*)(id,SEL))accessory_original)(self,cmd); vgi_views_changed();}
+static void display_moved(id self, SEL cmd){
+    if(display_original)((void(*)(id,SEL))display_original)(self,cmd);
+    extern void *vgi_node_for_view(void *);
+    void *node=vgi_node_for_view((void*)self);
+    int kind=vgi_kind(node);
+    if(kind==3||kind==4||kind==5||kind==6)vgi_views_changed();
+}
+#include <objc/message.h>
+void *vgi_node_for_view(void *view){
+    if(!view)return 0;
+    SEL sel=sel_registerName("asyncdisplaykit_node");
+    Class c=object_getClass((id)view);
+    Method m=class_getInstanceMethod(c,sel);
+    if(!m)return 0;
+    return ((void*(*)(id,SEL))objc_msgSend)((id)view,sel);
+}
+static void install_moved(const char *className, IMP hook, IMP *original){
+    Class c=objc_lookUpClass(className); if(!c||*original)return;
+    SEL sel=sel_registerName("didMoveToWindow");
+    Method m=class_getInstanceMethod(c,sel); if(!m)return;
+    *original=method_getImplementation(m);
+    if(!class_addMethod(c,sel,hook,method_getTypeEncoding(m))){
+        Method own=class_getInstanceMethod(c,sel);
+        *original=method_setImplementation(own,hook);
+    }
+}
+void vgi_install_hooks(void){
+    install_moved("_TtC10TelegramUI14AyuComposerBar",(IMP)bar_moved,&bar_original);
+    install_moved("_TtC22ChatTextInputPanelNode23AccessoryItemIconButton",(IMP)accessory_moved,&accessory_original);
+    install_moved("_ASDisplayView",(IMP)display_moved,&display_original);
 }
 static void activate(void *unused){ (void)unused; vgi_start(); }
 __attribute__((constructor)) static void initialize(void){
