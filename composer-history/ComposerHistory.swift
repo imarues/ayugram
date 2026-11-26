@@ -315,7 +315,9 @@ private final class ComposerPlacement {
                     _=nativeRelayout(ptr(panel))
                 }
                 if close(Double(a.bounds.width),wanted) {
-                    restorePeers();restoreEditor()
+                    // Native layout now owns these exact shifted values.
+                    // Do not restore old margins over a successful layout.
+                    peerShifts.removeAll();editorState=nil;textState=nil
                     alignGlyphs(a,base:CGFloat(base))
                     let r=a.convert(a.bounds,to:parent)
                     show(b,stack:stack,anchor:a,parent:parent,frame:CGRect(x:r.minX,y:r.minY,width:gap,height:r.height))
