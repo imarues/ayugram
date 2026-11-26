@@ -52,6 +52,32 @@ int vgi_set_width(void *obj,double expected,double value){
     if(!p||*p!=expected||!(expected>=16&&expected<=120)||!(value>=16&&value<=120))return 0;
     *p=value;return 1;
 }
+// A verified call site passes ContainedViewLayoutTransition.immediate in an
+// indirect 41-byte value and the native panel receiver in Swift's x20.
+extern void vgi_layout_call(const void *transition, void *panel, void *fn);
+__asm__(".text\n"
+        ".p2align 2\n"
+        "_vgi_layout_call:\n"
+        "stp x20, x30, [sp, #-16]!\n"
+        "mov x20, x1\n"
+        "blr x2\n"
+        "ldp x20, x30, [sp], #16\n"
+        "ret\n");
+int vgi_relayout(void *panel){
+    const struct mach_header_64 *h=ui();
+    if(!h||!exact_class(panel,"_TtC22ChatTextInputPanelNode22ChatTextInputPanelNode"))return 0;
+    const uint8_t *base=(const void*)h;
+    if(*(const uint32_t*)(base+0x29c3eec)!=0xaa1e03e1||
+       *(const uint32_t*)(base+0x29c3f0c)!=0x38686a88||
+       *(const uint32_t*)(base+0x29c3f10)!=0x37000828||
+       *(const uint32_t*)(base+0x29d21a4)!=0x97ffc752)return 0;
+    uint8_t *updating=field(panel,"_TtC22ChatTextInputPanelNode22ChatTextInputPanelNode",0x23,60,1);
+    if(!updating||*updating)return 0;
+    _Alignas(16) uint8_t transition[48]={0};
+    transition[40]=0xff;
+    vgi_layout_call(transition,panel,(void*)(base+0x29c3eec));
+    return 1;
+}
 void *vgi_archive(void *presentation,void *message){
     const struct mach_header_64 *h=ui(); if(!h||!image("/PostboxFramework",pb_uuid))return NULL;
     const uint8_t *base=(const void*)h;

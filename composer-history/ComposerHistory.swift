@@ -4,6 +4,7 @@ import Foundation
 @_silgen_name("vgi_compatible") private func nativeCompatible() -> Int32
 @_silgen_name("vgi_width") private func nativeWidth(_ p: UnsafeMutableRawPointer) -> Double
 @_silgen_name("vgi_set_width") private func nativeSetWidth(_ p: UnsafeMutableRawPointer, _ expected: Double, _ value: Double) -> Int32
+@_silgen_name("vgi_relayout") private func nativeRelayout(_ p: UnsafeMutableRawPointer) -> Int32
 @_silgen_name("vgi_archive") private func nativeArchive(_ ctx: UnsafeMutableRawPointer, _ msg: UnsafeMutableRawPointer) -> UnsafeMutableRawPointer?
 private func ptr(_ object: AnyObject) -> UnsafeMutableRawPointer { Unmanaged.passUnretained(object).toOpaque() }
 private func typeName(_ o: AnyObject) -> String { NSStringFromClass(type(of: o)) }
@@ -94,19 +95,18 @@ private final class ComposerPlacement {
     weak var original: UIButton?
     weak var anchor: UIView?
     weak var container: UIView?
+    weak var panel: NSObject?
     var baseWidth: Double = 0
     var baseInteraction = true
     var glyphs: [(UIView, CGAffineTransform)] = []
     let proxy = TranslateButton()
     init(bar: UIView) { self.bar = bar; baseInteraction = bar.isUserInteractionEnabled }
     func restoreAnchor() {
-        if let a = anchor, baseWidth > 0 {
-            _ = nativeSetWidth(ptr(a), baseWidth + 33, baseWidth)
-            if abs(a.frame.width - CGFloat(baseWidth + 33)) < 2 {
-                a.frame = CGRect(x: a.frame.minX + 33, y: a.frame.minY, width: CGFloat(baseWidth), height: a.frame.height)
-            }
-        }
         for (v, transform) in glyphs { v.transform = transform }
+        if let a = anchor, baseWidth > 0 {
+            let restored = nativeSetWidth(ptr(a), baseWidth + 33, baseWidth)
+            if restored != 0, a.window != nil, let p = panel { _ = nativeRelayout(ptr(p)) }
+        }
         glyphs.removeAll()
         anchor = nil
         baseWidth = 0
@@ -118,7 +118,7 @@ private final class ComposerPlacement {
         proxy.removeFromSuperview()
         original = nil
     }
-    func place(original b: UIButton, stack: UIStackView, anchor a: UIView, in parent: UIView) {
+    func place(original b: UIButton, stack: UIStackView, anchor a: UIView, in parent: UIView, panel p: NSObject) {
         if original !== b { original?.isHidden = false; original = b }
         if anchor !== a {
             restoreAnchor()
@@ -127,18 +127,21 @@ private final class ComposerPlacement {
             baseWidth = width
             anchor = a
             container = parent
+            panel = p
             // Native layout uses the width field for both editor insets and accessory positioning.
             for name in ["iconImageView", "textView", "animationView", "tintMaskTextView", "tintMaskAnimationView"] {
                 if let v = nodeView(member(a, name)), v !== a {
                     glyphs.append((v, v.transform))
                 }
             }
-            // Request a native layout; leave the original chip intact until the new slot is actually reserved.
-            var view: UIView? = parent
-            while let v = view { v.setNeedsLayout(); view = v.superview }
+            _ = nativeRelayout(ptr(p))
         }
         let width = nativeWidth(ptr(a))
-        if abs(width - baseWidth) < 0.1 { _ = nativeSetWidth(ptr(a), width, width + 33) }
+        if abs(width - baseWidth) < 0.1 {
+            for (v, transform) in glyphs { v.transform = transform }
+            if nativeSetWidth(ptr(a), width, width + 33) != 0 { _ = nativeRelayout(ptr(p)) }
+        }
+        if abs(a.frame.width - CGFloat(baseWidth + 33)) >= 2 { _ = nativeRelayout(ptr(p)) }
         guard abs(a.frame.width - CGFloat(baseWidth + 33)) < 2 else {
             proxy.removeFromSuperview(); b.isHidden = false; bar?.isUserInteractionEnabled = baseInteraction
             return
@@ -276,13 +279,25 @@ private final class Coordinator: NSObject {
                       let chat = member(v, "controller") as? UIViewController, let root = chat.viewIfLoaded else { continue }
                 // Only native composer accessory buttons; do not attach in a gallery, search or unrelated text field.
                 let accessories = views(root).filter { isType($0, "AccessoryItemIconButton") && visible($0) && $0.bounds.height >= 25 && $0.bounds.height <= 65 }
-                guard let a = accessories.min(by: { $0.convert($0.bounds, to: root).minX < $1.convert($1.bounds, to: root).minX }), let parent = a.superview,
+                let emoji = accessories.filter { candidate in
+                    guard let item = member(candidate, "item") else { return false }
+                    return Mirror(reflecting: item).children.first?.label == "input" || String(describing: item).hasPrefix("input(")
+                }
+                let candidates = emoji.isEmpty ? accessories : emoji
+                guard let a = candidates.min(by: { $0.convert($0.bounds, to: root).minX < $1.convert($1.bounds, to: root).minX }), let parent = a.superview,
                       parent.subviews.contains(where: { $0.layer.name == "textInputNodeClippingContainer" }) else { continue }
+                var ancestor: UIView? = parent
+                var panel: NSObject?
+                while let v = ancestor {
+                    if let n = node(v), isType(n, "ChatTextInputPanelNode") { panel = n; break }
+                    ancestor = v.superview
+                }
+                guard let panel else { continue }
                 let key = ObjectIdentifier(v)
                 let placement = placements[key] ?? ComposerPlacement(bar: v)
                 placements[key] = placement
                 seen.insert(key)
-                placement.place(original: b, stack: stack, anchor: a, in: parent)
+                placement.place(original: b, stack: stack, anchor: a, in: parent, panel: panel)
             }
             for v in all {
                 if let p = node(v), isType(p, "ContextControllerExtractedPresentationNode") { installHistory(p, view: v) }
