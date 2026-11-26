@@ -8,9 +8,13 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: composer-history-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: macos-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Build version-gated iOS arm64 dylib
