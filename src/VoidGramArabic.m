@@ -6,6 +6,10 @@
 #import <objc/message.h>
 #import <dispatch/dispatch.h>
 #import <stdatomic.h>
+#import <mach-o/dyld.h>
+#import <mach-o/loader.h>
+#import <execinfo.h>
+#import <string.h>
 #import "generated_voidgram_ar.h"
 
 static NSDictionary<NSString *, NSString *> *AGMap(void) {
@@ -198,6 +202,7 @@ static NSString *AGExternalExactText(NSString *text) {
     if (!AGArabicEnabled() || ![text isKindOfClass:NSString.class] || !text.length) return text;
     NSString *translated = AGExternalUIMap()[text];
     if (!translated) translated = AGExternalUIMap()[AGCanonicalText(text)];
+    if (!translated && text.length < 100) translated = AGExternalUIMap()[AGNormalizedUILabel(text)];
     if (translated.length) return translated;
     NSString *review = AGTranslateYearReview(text);
     return review ?: text;
@@ -211,9 +216,15 @@ static BOOL AGScreenshotActionOnly(NSString *text) {
     dispatch_once(&once, ^{
         keys = [NSSet setWithArray:@[@"Shadow ban", @"Shadow Ban",
             @"Export chat / Saved Messages", @"Lock with Face ID", @"Unlock with Face ID",
-            @"Hide chat", @"Unhide chat", @"Pin in \"📌 Pinned\"", @"Shorten (AI)"]];
+            @"Remove Face ID lock", @"Hide chat", @"Unhide chat", @"Show hidden chats",
+            @"Pin in \"📌 Pinned\"", @"Shorten (AI)"]];
     });
-    return [keys containsObject:AGCanonicalText(text)];
+    if (text.length > 96 || !text.length) return NO;
+    if ([keys containsObject:text]) return YES;
+    // Only the export row and pinned title need normalization in this IPA.
+    if ([text hasPrefix:@"Export chat"] || [text hasPrefix:@"Pin in"])
+        return [keys containsObject:AGNormalizedUILabel(text)];
+    return NO;
 }
 
 static BOOL AGIsProfileActionClass(NSString *name) {
@@ -238,18 +249,115 @@ static NSString *AGProfileActionText(NSString *text) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         labels = [NSSet setWithArray:@[@"Add a note", @"Set a nickname",
-            @"Name history", @"Edit note", @"Edit nickname", @"Remove nickname"]];
+            @"Name history", @"Edit note", @"Remove note", @"Edit nickname", @"Remove nickname"]];
         history = [NSRegularExpression regularExpressionWithPattern:
             @"^Name history \\(([0-9٠-٩۰-۹]+)\\)$" options:0 error:NULL];
     });
     if ([labels containsObject:text]) return AGMap()[text] ?: text;
-    if (![text hasPrefix:@"Name history ("]) return text;
-    NSTextCheckingResult *match = [history firstMatchInString:text options:0
-                                       range:NSMakeRange(0, text.length)];
-    if (!match || match.range.length != text.length) return text;
-    NSString *count = [text substringWithRange:[match rangeAtIndex:1]];
+    if (![text hasPrefix:@"Name history"]) return text;
+    NSString *normalized = AGNormalizedUILabel(text);
+    if (![normalized hasPrefix:@"Name history ("]) return text;
+    NSTextCheckingResult *match = [history firstMatchInString:normalized options:0
+                                       range:NSMakeRange(0, normalized.length)];
+    if (!match || match.range.length != normalized.length) return text;
+    NSString *count = [normalized substringWithRange:[match rangeAtIndex:1]];
     return [NSString stringWithFormat:AGMap()[@"Name history (%@)"] ?: @"سجل الأسماء (%@)", count];
 }
+// Verified against the exact TelegramUIFramework extracted from the user's IPA.
+// Native Swift properties on Display.ImmediateTextNode / ImmediateTextNodeWithEntities
+// do not necessarily expose Objective-C selectors. By the time didEnterHierarchy
+// runs, the text may already have been shaped/rasterized. Localize before the
+// NSAttributedString initializer, when a verified action renderer is on stack.
+// These offsets are unslid __TEXT addresses, not patch targets. UUID matching is
+// mandatory: a different app build must fall back to the existing scoped hooks.
+typedef NS_OPTIONS(uint8_t, AGRendererKind) {
+    AGRendererNone = 0,
+    AGRendererMenu = 1,
+    AGRendererProfileAction = 2,
+    AGRendererProfileDC = 4,
+};
+typedef struct { uintptr_t begin, end; AGRendererKind kind; } AGRendererRange;
+static const uint8_t AGVerifiedUUID[] = {
+    0x19,0xf6,0xe4,0xbf,0x5a,0x19,0x3d,0x56,0x9c,0x86,0xa0,0xa1,0xad,0xa2,0x4a,0x52
+};
+static const AGRendererRange AGVerifiedRendererRanges[] = {
+    {0x8ebdb4, 0x8ec518, AGRendererProfileAction}, // PeerInfoScreenActionItemNode.update
+    {0x9013e4, 0x90194c, AGRendererProfileDC}, // PeerInfoScreenInfoItemNode.update
+    {0x905bd0, 0x9087f0, AGRendererProfileDC}, // PeerInfoScreenLabeledValueItemNode.update
+    {0x239e208, 0x239efb8, AGRendererMenu}, // ContextActionNode.init
+    {0x239ff38, 0x23a0418, AGRendererMenu}, // ContextActionNode.updateTheme
+    {0x23a058c, 0x23a07bc, AGRendererMenu}, // ContextActionNode.updateAction
+    {0x23a7c0c, 0x23a9444, AGRendererMenu}, // ContextControllerActionsListActionItemNode.update
+};
+static atomic_uintptr_t AGVerifiedImageBase = ATOMIC_VAR_INIT(0);
+static uintptr_t AGFindVerifiedImageBase(void) {
+    uintptr_t base = atomic_load(&AGVerifiedImageBase);
+    if (base) return base;
+    const uint32_t count = _dyld_image_count();
+    for (uint32_t i = 0; i < count; ++i) {
+        const char *name = _dyld_get_image_name(i);
+        if (!name || !strstr(name, "/TelegramUIFramework.framework/TelegramUIFramework")) continue;
+        const struct mach_header *header = _dyld_get_image_header(i);
+        if (!header || header->magic != MH_MAGIC_64) continue;
+        const struct mach_header_64 *h = (const struct mach_header_64 *)header;
+        const uint8_t *p = (const uint8_t *)(h + 1);
+        uint32_t remaining = h->sizeofcmds;
+        for (uint32_t j = 0; j < h->ncmds && remaining >= sizeof(struct load_command); ++j) {
+            const struct load_command *lc = (const struct load_command *)p;
+            if (lc->cmdsize < sizeof(struct load_command) || lc->cmdsize > remaining) break;
+            if (lc->cmd == LC_UUID && lc->cmdsize >= sizeof(struct uuid_command)) {
+                const struct uuid_command *uuid = (const struct uuid_command *)lc;
+                if (memcmp(uuid->uuid, AGVerifiedUUID, sizeof(AGVerifiedUUID)) == 0) {
+                    base = (uintptr_t)h; // verified framework has __TEXT vmaddr = 0
+                    atomic_store(&AGVerifiedImageBase, base);
+                    return base;
+                }
+                break;
+            }
+            p += lc->cmdsize;
+            remaining -= lc->cmdsize;
+        }
+    }
+    return 0;
+}
+static AGRendererKind AGNativeRendererOnStack(void) {
+    uintptr_t base = AGFindVerifiedImageBase();
+    if (!base) return AGRendererNone;
+    // Only called after an exact screenshot label or a strict count match.
+    // There is no stack walk on arbitrary messages, and no code patching.
+    void *frames[32];
+    int count = backtrace(frames, 32);
+    for (int i = 0; i < count; ++i) {
+        uintptr_t pc = (uintptr_t)frames[i];
+        if (pc <= base) continue;
+        uintptr_t offset = pc - base - 1; // return address belongs to preceding BL
+        for (NSUInteger j = 0; j < sizeof(AGVerifiedRendererRanges) / sizeof(AGVerifiedRendererRanges[0]); ++j) {
+            const AGRendererRange *r = &AGVerifiedRendererRanges[j];
+            if (offset >= r->begin && offset < r->end) return r->kind;
+        }
+    }
+    return AGRendererNone;
+}
+static NSString *AGTranslate(NSString *text);
+static NSString *AGTranslateConstruction(NSString *text) {
+    if (![text isKindOfClass:NSString.class] || !text.length || !AGArabicEnabled())
+        return text;
+    if (text.length <= 96) {
+        NSString *menu = AGScreenshotActionOnly(text) ? AGExternalExactText(text) : text;
+        NSString *profile = AGProfileActionText(text);
+        const BOOL isMenu = ![menu isEqualToString:text];
+        const BOOL isProfile = ![profile isEqualToString:text];
+        const BOOL isDC = [text isEqualToString:@"DC4, Amsterdam, NL"];
+        if (isMenu || isProfile || isDC) {
+            AGRendererKind kind = AGNativeRendererOnStack();
+            if (isMenu && kind == AGRendererMenu) return menu;
+            if (isProfile && kind == AGRendererProfileAction) return profile;
+            if (isDC && kind == AGRendererProfileDC) return AGMap()[text] ?: text;
+        }
+    }
+    return AGTranslate(text);
+}
+
 static id AGNodeParent(id node) {
     SEL sel = NSSelectorFromString(@"supernode");
     return [node respondsToSelector:sel] ? ((id (*)(id, SEL))objc_msgSend)(node, sel) : nil;
@@ -303,7 +411,6 @@ static BOOL AGIsExternalActionView(UIView *view) {
     return NO;
 }
 
-static NSString *AGTranslate(NSString *text);
 static NSString *AGScopedExternalNodeText(id node, NSString *value) {
     if (!value.length || !AGArabicEnabled()) return value;
     NSString *replacement = AGExternalExactText(value);
@@ -676,14 +783,14 @@ static void AGButtonAttr(UIButton *obj, SEL cmd, NSAttributedString *value, UICo
 static IMP origAttributedInit = NULL;
 static id AGAttributedInit(id obj, SEL cmd, NSString *value) {
     return origAttributedInit
-        ? ((id (*)(id, SEL, NSString *))origAttributedInit)(obj, cmd, AGTranslate(value))
+        ? ((id (*)(id, SEL, NSString *))origAttributedInit)(obj, cmd, AGTranslateConstruction(value))
         : obj;
 }
 static IMP origAttributedInitAttrs = NULL;
 static id AGAttributedInitAttrs(id obj, SEL cmd, NSString *value, NSDictionary *attrs) {
     return origAttributedInitAttrs
         ? ((id (*)(id, SEL, NSString *, NSDictionary *))origAttributedInitAttrs)
-            (obj, cmd, AGTranslate(value), attrs)
+            (obj, cmd, AGTranslateConstruction(value), attrs)
         : obj;
 }
 static IMP origASAttributed = NULL;
@@ -758,24 +865,24 @@ static id AGConcreteMutableCopy(id obj, SEL cmd, NSAttributedString *value) {
 
 static id AGConcreteImmutablePlain(id obj, SEL cmd, NSString *value) {
     return originalConcreteImmutablePlain
-        ? ((id (*)(id, SEL, NSString *))originalConcreteImmutablePlain)(obj, cmd, AGTranslate(value))
+        ? ((id (*)(id, SEL, NSString *))originalConcreteImmutablePlain)(obj, cmd, AGTranslateConstruction(value))
         : obj;
 }
 static id AGConcreteImmutableAttrs(id obj, SEL cmd, NSString *value, NSDictionary *attrs) {
     return originalConcreteImmutableAttrs
         ? ((id (*)(id, SEL, NSString *, NSDictionary *))originalConcreteImmutableAttrs)
-          (obj, cmd, AGTranslate(value), attrs)
+          (obj, cmd, AGTranslateConstruction(value), attrs)
         : obj;
 }
 static id AGConcreteMutablePlain(id obj, SEL cmd, NSString *value) {
     return originalConcreteMutablePlain
-        ? ((id (*)(id, SEL, NSString *))originalConcreteMutablePlain)(obj, cmd, AGTranslate(value))
+        ? ((id (*)(id, SEL, NSString *))originalConcreteMutablePlain)(obj, cmd, AGTranslateConstruction(value))
         : obj;
 }
 static id AGConcreteMutableAttrs(id obj, SEL cmd, NSString *value, NSDictionary *attrs) {
     return originalConcreteMutableAttrs
         ? ((id (*)(id, SEL, NSString *, NSDictionary *))originalConcreteMutableAttrs)
-          (obj, cmd, AGTranslate(value), attrs)
+          (obj, cmd, AGTranslateConstruction(value), attrs)
         : obj;
 }
 
@@ -830,16 +937,18 @@ static void AGTelegramTextAttributed(id obj, SEL cmd, NSAttributedString *value)
 
 static void AGHookTelegramTextNodes(void) {
     // Hook only methods implemented on a specific class (not inherited).
-    Class immediate = NSClassFromString(@"ImmediateTextNode");
+    Class immediate = NSClassFromString(@"Display.ImmediateTextNode") ?:
+                      NSClassFromString(@"_TtC7Display17ImmediateTextNode") ?: NSClassFromString(@"ImmediateTextNode");
     if (immediate) {
         Method m = class_getInstanceMethod(immediate, @selector(setAttributedText:));
-        if (m) AGHookConcrete(immediate, @selector(setAttributedText:),
+        if (m && m != class_getInstanceMethod(class_getSuperclass(immediate), @selector(setAttributedText:))) AGHookConcrete(immediate, @selector(setAttributedText:),
                               (IMP)AGImmediateTextAttributed, &origImmediateTextAttributed);
     }
-    Class textNode = NSClassFromString(@"TextNode");
+    Class textNode = NSClassFromString(@"Display.TextNode") ?:
+                     NSClassFromString(@"_TtC7Display8TextNode") ?: NSClassFromString(@"TextNode");
     if (textNode && textNode != immediate) {
         Method m = class_getInstanceMethod(textNode, @selector(setAttributedText:));
-        if (m) AGHookConcrete(textNode, @selector(setAttributedText:),
+        if (m && m != class_getInstanceMethod(class_getSuperclass(textNode), @selector(setAttributedText:))) AGHookConcrete(textNode, @selector(setAttributedText:),
                               (IMP)AGTelegramTextAttributed, &origTelegramTextAttributed);
     }
 }

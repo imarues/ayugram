@@ -188,4 +188,29 @@ assert translations["Name history (%@)"].count("%@") == 1
 header = ROOT / "src" / "generated_voidgram_ar.h"
 if not header.is_file():
     raise SystemExit("Generated translation header missing; run build script first")
+# The reported menu/profile labels already existed in the map; the native
+# Swift renderer must be recognized before Foundation initializes text.
+for guard in (
+    "AGTranslateConstruction(value)",
+    "AGNativeRendererOnStack()",
+    "memcmp(uuid->uuid, AGVerifiedUUID, sizeof(AGVerifiedUUID)) == 0",
+    "if (!base) return AGRendererNone;",
+    "if (isMenu && kind == AGRendererMenu) return menu;",
+    "if (isProfile && kind == AGRendererProfileAction) return profile;",
+    'NSClassFromString(@"Display.ImmediateTextNode")',
+    'NSClassFromString(@"Display.TextNode")',
+    "offset >= r->begin && offset < r->end",
+    "if (isMenu || isProfile || isDC)",
+    "void *frames[32];",
+):
+    assert guard in source, f"Missing native renderer safety guard: {guard}"
+for name in ("AGAttributedInit", "AGAttributedInitAttrs", "AGConcreteImmutablePlain",
+             "AGConcreteImmutableAttrs", "AGConcreteMutablePlain", "AGConcreteMutableAttrs"):
+    start = source.index(f"static id {name}(")
+    end = source.index("\n}", start)
+    assert "AGTranslateConstruction(value)" in source[start:end], name
+for k in ("Remove Face ID lock", "Show hidden chats"):
+    assert k in external_map
+assert "Remove note" in translations
+assert source.count("backtrace(frames, 32)") == 1
 print(f"PASS: {len(translations)} VoidGram translation keys, nested page scope + exit guard, iOS source present")
