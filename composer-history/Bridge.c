@@ -70,13 +70,17 @@ int vgi_kind(void *obj){
         "_TtC21ContextControllerImpl42ContextControllerExtractedPresentationNode",
         "_TtC21ContextControllerImpl17ContextActionNode",
         "_TtC21ContextControllerImpl42ContextControllerActionsListActionItemNode",
-        "_TtC10TelegramUI18ChatControllerImpl"
+        "_TtC10TelegramUI18ChatControllerImpl",
+        "_TtC10TelegramUIP33_F4622A4AA96A8F4630A22AAB747A555C29ChatReadReportContextItemNode",
+        "_TtC21ContextControllerImplP33_0F3557A72401F2D3216C491A5145FE3C42ContextControllerActionsListCustomItemNode",
+        "_TtC26ChatRichTextEditorComposer27RichTextEditorChatInputNode",
+        "_TtC19RichTextEditorUIKit18RichTextEditorView"
     };
-    static Class known[7]={0};
-    for(int i=0;i<7;i++)if(known[i]==c)return i+1;
+    static Class known[11]={0};
+    for(int i=0;i<11;i++)if(known[i]==c)return i+1;
     const char *n=class_getName(c);
     if(!n||((n[0]!='_'||n[1]!='T')&&!strchr(n,'.')))return 0;
-    for(int i=0;i<7;i++)if(exact_class(obj,names[i])){known[i]=c;return i+1;}
+    for(int i=0;i<11;i++)if(exact_class(obj,names[i])){known[i]=c;return i+1;}
     return 0;
 }
 static void *read_object(void *obj,const char *name,size_t vec,size_t i){
@@ -86,6 +90,73 @@ static void *read_object(void *obj,const char *name,size_t vec,size_t i){
 void *vgi_clip(void *panel){
     if(!ui())return 0;
     return read_object(panel,"_TtC22ChatTextInputPanelNode22ChatTextInputPanelNode",0x23,7);
+}
+void *vgi_editor(void *panel){
+    if(!ui())return 0;
+    void *obj=read_object(panel,"_TtC22ChatTextInputPanelNode22ChatTextInputPanelNode",0x23,9);
+    return vgi_kind(obj)==10?obj:0;
+}
+static double *editor_inset(void *editor){
+    if(!ui())return 0;
+    return field(editor,"_TtC26ChatRichTextEditorComposer27RichTextEditorChatInputNode",0xa,5,8);
+}
+double vgi_editor_inset(void *editor){
+    double *p=editor_inset(editor);return p?*p:-1;
+}
+extern void vgi_editor_layout_call(void *editor,void *fn,double width,double right);
+__asm__(".text\n"
+        ".p2align 2\n"
+        "_vgi_editor_layout_call:\n"
+        "stp x20, x30, [sp, #-16]!\n"
+        "mov x20, x0\n"
+        "blr x1\n"
+        "ldp x20, x30, [sp], #16\n"
+        "ret\n");
+int vgi_editor_reserve(void *editor,double width,double expected,double right){
+    const uint8_t *base=(const void*)ui();
+    double *p=editor_inset(editor);
+    if(!base||!p||*p!=expected||!(width>=50&&width<=2000)||!(right>=0&&right<=250))return 0;
+    // This exact native routine stores d1 as trackedRightInset and forwards
+    // d1+14 in the actual editor-layout margins. d0 is the editor width.
+    if(*(const uint32_t*)(base+0x2f97aec)!=0xd101c3ff||
+       *(const uint32_t*)(base+0x2f97b14)!=0xfc286a81||
+       *(const uint32_t*)(base+0x2f97b3c)!=0x1e659000||
+       *(const uint32_t*)(base+0x2f97b6c)!=0xd63f0100)return 0;
+    vgi_editor_layout_call(editor,(void*)(base+0x2f97aec),width,right);
+    return *p==right;
+}
+#define READ_ROW "_TtC10TelegramUIP33_F4622A4AA96A8F4630A22AAB747A555C29ChatReadReportContextItemNode"
+#define READ_ITEM "_TtC10TelegramUI25ChatReadReportContextItem"
+#define CUSTOM_ROW "_TtC21ContextControllerImplP33_0F3557A72401F2D3216C491A5145FE3C42ContextControllerActionsListCustomItemNode"
+void *vgi_read_row(void *obj){
+    if(!ui())return 0;
+    int k=vgi_kind(obj);
+    if(k==8)return obj;
+    if(k==9){
+        void *row=read_object(obj,CUSTOM_ROW,0xa,4);
+        return vgi_kind(row)==8?row:0;
+    }
+    return 0;
+}
+static void *read_item(void *row){
+    return read_object(row,READ_ROW,0xa,0);
+}
+int vgi_read_is_edit(void *row){
+    if(!ui())return 0;
+    uint8_t *p=field(read_item(row),READ_ITEM,0xa,3,1);
+    return p&&*p==1;
+}
+void *vgi_read_message(void *row){
+    if(!vgi_read_is_edit(row))return 0;
+    return read_object(read_item(row),READ_ITEM,0xa,1);
+}
+void *vgi_read_text(void *row){
+    if(!vgi_read_is_edit(row))return 0;
+    return read_object(row,READ_ROW,0xa,6);
+}
+void *vgi_read_button(void *row){
+    if(!vgi_read_is_edit(row))return 0;
+    return read_object(row,READ_ROW,0xa,15);
 }
 void *vgi_glyph(void *accessory,int i){
     if(!ui()||i<0||i>4)return 0;
@@ -163,7 +234,7 @@ int vgi_relayout(void *panel){
     vgi_layout_call(transition,panel,(void*)(base+0x29c3eec));
     return 1;
 }
-void *vgi_archive(void *presentation,void *message,void *chat){
+void *vgi_archive(void *presentation,void *message,void *chat,void *row){
     const struct mach_header_64 *h=ui(); if(!h||!pb())return NULL;
     const uint8_t *base=(const void*)h;
     // Exact implementation fingerprint: frame prologue, allocation call, storing the 24-byte ID and optional tag.
@@ -172,7 +243,8 @@ void *vgi_archive(void *presentation,void *message,void *chat){
        *(const uint32_t*)(base+0xd85448)!=0xa9006119||
        *(const uint32_t*)(base+0xd8544c)!=0xf9000917||
        *(const uint32_t*)(base+0xd85450)!=0x39006116)return NULL;
-    uintptr_t *ctx=field(presentation,"_TtC21ContextControllerImpl42ContextControllerExtractedPresentationNode",0xa,2,16);
+    uintptr_t *ctx=vgi_read_is_edit(row)?field(read_item(row),READ_ITEM,0xa,0,16):0;
+    if(!ctx||!ctx[0]||!ctx[1])ctx=field(presentation,"_TtC21ContextControllerImpl42ContextControllerExtractedPresentationNode",0xa,2,16);
     if(!ctx||!ctx[0]||!ctx[1])ctx=field(chat,"_TtC10TelegramUI18ChatControllerImpl",0x115,8,16);
     uintptr_t *mid=field(message,"_TtC7Postbox7Message",0xa,2,24);
     if(!ctx||!ctx[0]||!ctx[1]||!mid)return NULL;
@@ -191,7 +263,7 @@ static void display_moved(id self, SEL cmd){
     extern void *vgi_node_for_view(void *);
     void *node=vgi_node_for_view((void*)self);
     int kind=vgi_kind(node);
-    if(kind==3||kind==4||kind==5||kind==6)vgi_views_changed();
+    if(kind==3||kind==4||kind==5||kind==6||kind==8||kind==9||kind==10)vgi_views_changed();
 }
 #include <objc/message.h>
 void *vgi_node_for_view(void *view){

@@ -12,7 +12,15 @@ import Foundation
 @_silgen_name("vgi_menu_chat") private func nativeChat(_ p: UnsafeMutableRawPointer) -> UnsafeMutableRawPointer?
 @_silgen_name("vgi_action_text") private func nativeActionText(_ p: UnsafeMutableRawPointer) -> UnsafeRawPointer?
 @_silgen_name("vgi_action_label") private func nativeActionLabel(_ p: UnsafeMutableRawPointer) -> UnsafeMutableRawPointer?
-@_silgen_name("vgi_archive") private func nativeArchive(_ p: UnsafeMutableRawPointer, _ m: UnsafeMutableRawPointer, _ c: UnsafeMutableRawPointer) -> UnsafeMutableRawPointer?
+@_silgen_name("vgi_archive") private func nativeArchive(_ p: UnsafeMutableRawPointer?, _ m: UnsafeMutableRawPointer, _ c: UnsafeMutableRawPointer?, _ row: UnsafeMutableRawPointer?) -> UnsafeMutableRawPointer?
+@_silgen_name("vgi_editor") private func nativeEditor(_ p: UnsafeMutableRawPointer) -> UnsafeMutableRawPointer?
+@_silgen_name("vgi_editor_inset") private func nativeEditorInset(_ p: UnsafeMutableRawPointer) -> Double
+@_silgen_name("vgi_editor_reserve") private func nativeEditorReserve(_ p: UnsafeMutableRawPointer, _ width: Double, _ expected: Double, _ right: Double) -> Int32
+@_silgen_name("vgi_read_row") private func nativeReadRow(_ p: UnsafeMutableRawPointer) -> UnsafeMutableRawPointer?
+@_silgen_name("vgi_read_is_edit") private func nativeReadIsEdit(_ p: UnsafeMutableRawPointer) -> Int32
+@_silgen_name("vgi_read_message") private func nativeReadMessage(_ p: UnsafeMutableRawPointer) -> UnsafeMutableRawPointer?
+@_silgen_name("vgi_read_text") private func nativeReadText(_ p: UnsafeMutableRawPointer) -> UnsafeMutableRawPointer?
+@_silgen_name("vgi_read_button") private func nativeReadButton(_ p: UnsafeMutableRawPointer) -> UnsafeMutableRawPointer?
 @_silgen_name("vgi_install_hooks") private func nativeInstallHooks()
 @_silgen_name("vgi_node_for_view") private func nativeNode(_ p: UnsafeMutableRawPointer) -> UnsafeMutableRawPointer?
 
@@ -25,8 +33,21 @@ private func nodeView(_ o: AnyObject?) -> UIView? {
     guard let n = o as? NSObject else { return nil }
     let sel = NSSelectorFromString("view")
     guard n.responds(to: sel) else { return nil }
+    // Never request a UIView from a layer-backed ASDisplayNode.
+    let layerSel = NSSelectorFromString("isLayerBacked")
+    if n.responds(to: layerSel) {
+        typealias Getter = @convention(c) (AnyObject, Selector) -> Bool
+        if let f=n.method(for:layerSel), unsafeBitCast(f,to:Getter.self)(n,layerSel) { return nil }
+    }
     return n.perform(sel)?.takeUnretainedValue() as? UIView
 }
+private func nodeLayer(_ o: AnyObject?) -> CALayer? {
+    if let view=o as? UIView { return view.layer }
+    guard let n=o as? NSObject else { return nil }
+    let sel=NSSelectorFromString("layer")
+    return n.responds(to:sel) ? n.perform(sel)?.takeUnretainedValue() as? CALayer : nil
+}
+private func maybeNode(_ view: UIView) -> NSObject? { node(view) ?? (kind(view)>0 ? view : nil) }
 private func visible(_ v: UIView) -> Bool {
     guard v.window != nil, !v.bounds.isEmpty else { return false }
     var p: UIView? = v
@@ -101,91 +122,77 @@ private final class TranslateButton: UIButton {
 private final class ComposerPlacement {
     weak var bar: UIView?
     weak var original: UIButton?
-    weak var anchor: UIView?
-    weak var panel: NSObject?
-    weak var clip: UIView?
-    var baseWidth: Double = 0
-    var glyphs: [(UIView,CGAffineTransform)] = []
+    weak var editor: NSObject?
+    weak var editorView: UIView?
+    var baseline: Double?
+    var applied: Double?
+    var lastWidth: Double=0
     let button = TranslateButton()
     private var insetViews = [(UITextView, UIEdgeInsets)]()
-    private var changedClip: (UIView, CGRect)?
+    private var changedEditor: (UIView, CGRect)?
     let gap: CGFloat = 33
     init(_ bar: UIView) { self.bar = bar }
     private func restoreFallback() {
-        for (tv, old) in insetViews {
-            if abs(tv.textContainerInset.right-old.right-gap) < 1 { tv.textContainerInset = old }
+        for (tv,old) in insetViews {
+            if abs(tv.textContainerInset.right-old.right-gap)<1 { tv.textContainerInset=old }
         }
         insetViews.removeAll()
-        if let (v, old) = changedClip, abs(v.frame.width-old.width+gap) < 1 { v.frame = old }
-        changedClip = nil
+        if let (v,old)=changedEditor,abs(v.frame.width-old.width+gap)<1 { v.frame=old }
+        changedEditor=nil
     }
-    private func restoreAnchor() {
-        restoreFallback()
-        for (v, t) in glyphs { v.transform = t }
-        glyphs.removeAll()
-        if let a = anchor, baseWidth > 0 {
-            let changed = nativeSetWidth(ptr(a), baseWidth+Double(gap), baseWidth)
-            if changed != 0, a.window != nil, let p = panel { _ = nativeRelayout(ptr(p)) }
+    private func restoreNative() {
+        if let e=editor,let old=baseline,let new=applied,abs(nativeEditorInset(ptr(e))-new)<0.1,lastWidth>=50 {
+            _=nativeEditorReserve(ptr(e),lastWidth,new,old)
         }
-        anchor = nil; panel = nil; baseWidth = 0
+        editor=nil;editorView=nil;baseline=nil;applied=nil;lastWidth=0
     }
     func reset() {
-        restoreAnchor()
-        original?.isHidden = false; original = nil
+        restoreNative();restoreFallback()
+        original?.isHidden=false;original=nil
         button.removeFromSuperview()
-        bar?.isUserInteractionEnabled = true
+        bar?.isUserInteractionEnabled=true
     }
-    func place(_ b: UIButton, stack: UIStackView, anchor a: UIView, parent: UIView, panel p: NSObject?, clip c: UIView?) {
-        if original !== b { original?.isHidden = false; original = b }
-        if anchor !== a {
-            restoreAnchor()
-            self.anchor = a; self.panel = p; self.clip = c
-            let width = nativeWidth(ptr(a))
-            if let p, width >= 12, width <= 90, nativeSetWidth(ptr(a), width, width+Double(gap)) != 0 {
-                baseWidth = width
-                for i: Int32 in [0,1,2,3,4] {
-                    if let v = nodeView(object(nativeGlyph(ptr(a),i))), v !== a { glyphs.append((v,v.transform)) }
+    private func reserve(_ e:NSObject?, _ richView:UIView?, _ clip:UIView?) {
+        if editor !== e { restoreNative();restoreFallback();editor=e }
+        if let e,let v=richView ?? nodeView(e),v.bounds.width>=50 {
+            let current=nativeEditorInset(ptr(e)), width=Double(v.bounds.width)
+            if current>=0 && current<=180 {
+                if applied==nil || abs(current-(applied ?? -1000))>0.1 { baseline=current;applied=nil }
+                let desired=(baseline ?? current)+Double(gap)
+                if abs(current-desired)<0.1 && abs(width-lastWidth)<0.5 { restoreFallback();return }
+                if nativeEditorReserve(ptr(e),width,current,desired) != 0 {
+                    editorView=v;applied=desired;lastWidth=width
+                    restoreFallback();return
                 }
-                _ = nativeRelayout(ptr(p))
             }
         }
-        var reserved = baseWidth > 0 && abs(a.bounds.width-CGFloat(baseWidth)-gap)<3
-        if !reserved, baseWidth > 0, let p {
-            let width = nativeWidth(ptr(a))
-            if abs(width-baseWidth)<1 { _ = nativeSetWidth(ptr(a),width,width+Double(gap)) }
-            _ = nativeRelayout(ptr(p))
-            reserved = abs(a.bounds.width-CGFloat(baseWidth)-gap)<3
-        }
-        if reserved {
-            restoreFallback()
-            for (v,t) in glyphs {
-                let center = v.center.x
-                if abs(center-a.bounds.midX)<5 || v.transform != t { v.transform = t.translatedBy(x: gap/2,y: 0) }
-            }
-        } else {
-            // Public UIKit fallback: reserve the text area's right inset instead of leaving the chip floating.
-            if let c, insetViews.isEmpty, changedClip == nil {
-                let editors = descendants(c, limit: 350).compactMap { $0 as? UITextView }
-                if editors.isEmpty, c.frame.width > 80 {
-                    changedClip = (c,c.frame); c.frame.size.width -= gap
-                } else {
-                    for tv in editors {
-                        let old = tv.textContainerInset; insetViews.append((tv,old))
-                        var new = old; new.right += gap; tv.textContainerInset = new
-                    }
-                }
-            } else if let (v, old) = changedClip, abs(v.frame.width-old.width)<2 { v.frame.size.width -= gap }
-            for (tv, old) in insetViews where abs(tv.textContainerInset.right-old.right)<1 {
-                var new = old; new.right += gap; tv.textContainerInset = new
+        // Older UIKit text backends: keep a real editable margin, not merely a clip.
+        let views=clip.map { descendants($0,limit:500) } ?? []
+        let editors=views.compactMap{$0 as? UITextView}
+        for tv in editors {
+            if let old=insetViews.first(where:{$0.0===tv})?.1 {
+                if abs(tv.textContainerInset.right-old.right)<1 { var inset=old;inset.right+=gap;tv.textContainerInset=inset }
+            } else {
+                let old=tv.textContainerInset;insetViews.append((tv,old));var inset=old;inset.right+=gap;tv.textContainerInset=inset
             }
         }
-        let frame = CGRect(x: a.frame.minX-(reserved ? 0 : gap), y: a.frame.minY, width: gap, height: a.frame.height)
-        guard frame.minX >= parent.bounds.minX-2, frame.height > 15 else { return }
-        if button.superview !== parent { button.removeFromSuperview(); parent.addSubview(button) }
-        button.frame = frame; parent.bringSubviewToFront(button)
-        button.sync(b,anchor:a)
-        b.isHidden = true
-        bar?.isUserInteractionEnabled = !stack.arrangedSubviews.allSatisfy { $0.isHidden }
+        if editors.isEmpty,let v=richView,v.frame.width>80 {
+            if let (_,old)=changedEditor {
+                if abs(v.frame.width-old.width)<1 { v.frame.size.width-=gap;v.setNeedsLayout();v.layoutIfNeeded() }
+            } else {
+                changedEditor=(v,v.frame);v.frame.size.width-=gap;v.setNeedsLayout();v.layoutIfNeeded()
+            }
+        }
+    }
+    func place(_ b:UIButton,stack:UIStackView,anchor a:UIView,parent:UIView,editor e:NSObject?,richView:UIView?,clip:UIView?) {
+        if original !== b { original?.isHidden=false;original=b }
+        let frame=CGRect(x:a.frame.minX-gap,y:a.frame.minY,width:gap,height:a.frame.height)
+        guard frame.minX>=parent.bounds.minX-2,frame.height>15 else { return }
+        if button.superview !== parent { button.removeFromSuperview();parent.addSubview(button) }
+        button.frame=frame;parent.bringSubviewToFront(button);button.sync(b,anchor:a)
+        reserve(e,richView,clip)
+        b.isHidden=true
+        bar?.isUserInteractionEnabled = !stack.arrangedSubviews.allSatisfy{ $0.isHidden }
     }
 }
 
@@ -212,46 +219,60 @@ private final class ArchiveContainer: UIViewController {
     }
     @objc private func done() { dismiss(animated:true) }
 }
-private final class HistoryAction: UIView {
+private final class HistoryAction: UIButton {
     weak var presentation: NSObject?
+    weak var row: NSObject?
     weak var chat: UIViewController?
-    weak var nativeText: UIView?
+    weak var nativeText: CALayer?
     weak var root: UIViewController?
-    let label = UILabel(), detail = UILabel()
-    init(presentation: NSObject, chat: UIViewController?, root: UIViewController?, nativeText: UIView?, time: String, color: UIColor) {
-        self.presentation=presentation; self.chat=chat; self.root=root; self.nativeText=nativeText
+    let label=UILabel(),detail=UILabel()
+    init(presentation:NSObject?,row:NSObject?,chat:UIViewController?,root:UIViewController?,nativeText:CALayer?,time:String,color:UIColor) {
+        self.presentation=presentation;self.row=row;self.chat=chat;self.root=root;self.nativeText=nativeText
         super.init(frame:.zero)
-        accessibilityLabel="سجل التعديلات"; isAccessibilityElement=true; accessibilityTraits = .button
-        nativeText?.alpha=0
-        label.text="سجل التعديلات"; label.textColor=color; label.font = .systemFont(ofSize:16,weight:.medium)
-        detail.text=time; detail.textColor=color.withAlphaComponent(0.72); detail.font = .systemFont(ofSize:11)
-        detail.adjustsFontSizeToFitWidth=true; detail.minimumScaleFactor=0.65
-        for l in [label,detail] { l.isUserInteractionEnabled=false; l.textAlignment = .natural; addSubview(l) }
-        addGestureRecognizer(UITapGestureRecognizer(target:self,action:#selector(open(_:))))
+        accessibilityLabel="سجل التعديلات";accessibilityTraits = .button;isAccessibilityElement=true
+        label.text="سجل التعديلات";label.textColor=color;label.font = .systemFont(ofSize:16,weight:.medium)
+        detail.text=time.isEmpty ? "عرض النص قبل التعديل" : time
+        detail.textColor=color.withAlphaComponent(0.72);detail.font = .systemFont(ofSize:11)
+        detail.adjustsFontSizeToFitWidth=true;detail.minimumScaleFactor=0.65
+        for l in [label,detail] { l.isUserInteractionEnabled=false;l.textAlignment = .natural;addSubview(l) }
+        addTarget(self,action:#selector(open),for:.touchUpInside)
     }
-    required init?(coder: NSCoder) { nil }
-    override func layoutSubviews() {
+    required init?(coder:NSCoder){nil}
+    deinit { nativeText?.opacity=1 }
+    override func layoutSubviews(){
         super.layoutSubviews()
         label.frame=CGRect(x:0,y:max(0,(bounds.height-35)/2),width:bounds.width,height:20)
         detail.frame=CGRect(x:0,y:label.frame.maxY,width:bounds.width,height:15)
     }
-    @objc private func open(_ gesture: UITapGestureRecognizer) {
-        guard gesture.state == .ended, let p=presentation else { return }
-        let chat = self.chat ?? root.flatMap { findChat($0) }
-        guard let m=nativeMessage(ptr(p)), let chat, let raw=nativeArchive(ptr(p),m,ptr(chat)) else {
-            let presenter = root.map(visibleController) ?? chat
+    @objc private func open(){
+        let p=presentation
+        let chat=self.chat ?? root.flatMap{findChat($0)}
+        let rowPtr=row.map(ptr)
+        let menuPtr=p.map(ptr)
+        let message=rowPtr.flatMap{nativeReadMessage($0)} ?? menuPtr.flatMap{nativeMessage($0)}
+        guard let m=message,let raw=nativeArchive(menuPtr,m,chat.map(ptr),rowPtr),
+              let archive=Unmanaged<AnyObject>.fromOpaque(raw).takeRetainedValue() as? UIViewController else {
+            let presenter=root.map(visibleController) ?? chat
             if let presenter {
-                let a=UIAlertController(title:"سجل التعديلات",message:"تعذر الوصول إلى السجل المحلي لهذه الرسالة.",preferredStyle:.alert)
-                a.addAction(UIAlertAction(title:"حسناً",style:.default)); presenter.present(a,animated:true)
+                let a=UIAlertController(title:"سجل التعديلات",message:"تعذر فتح السجل المحلي لهذه الرسالة.",preferredStyle:.alert)
+                a.addAction(UIAlertAction(title:"حسناً",style:.default));presenter.present(a,animated:true)
             }
             return
         }
-        guard let archive = Unmanaged<AnyObject>.fromOpaque(raw).takeRetainedValue() as? UIViewController else { return }
-        let sel=NSSelectorFromString("dismissTapGesture:")
-        if p.responds(to:sel) { _ = p.perform(sel,with:gesture) }
-        DispatchQueue.main.asyncAfter(deadline:.now()+0.46) { [weak chat, weak root=self.root] in
-            guard let presenter = root.map(visibleController) ?? chat else { return }
-            let container=ArchiveContainer(archive); container.modalPresentationStyle = .pageSheet
+        // Dismiss the native context menu before presenting an independent sheet.
+        if let p {
+            let sel=NSSelectorFromString("dismissTapGesture:")
+            if p.responds(to:sel) {
+                let g=UITapGestureRecognizer()
+                _=p.perform(sel,with:g)
+            }
+        }
+        if let controller=root.map(visibleController),NSStringFromClass(type(of:controller)).contains("ContextControllerImpl") {
+            controller.dismiss(animated:true)
+        }
+        DispatchQueue.main.asyncAfter(deadline:.now()+0.5){[weak chat,weak root=self.root] in
+            guard let presenter=chat.map(visibleController) ?? root.map(visibleController) else{return}
+            let container=ArchiveContainer(archive);container.modalPresentationStyle = .pageSheet
             presenter.present(container,animated:true)
         }
     }
@@ -270,7 +291,7 @@ private final class Coordinator: NSObject {
         NotificationCenter.default.addObserver(self,selector:#selector(schedule),name:UIWindow.didBecomeVisibleNotification,object:nil)
         let t=Timer(timeInterval:0.4,target:self,selector:#selector(tick),userInfo:nil,repeats:true)
         RunLoop.main.add(t,forMode:.common); timer=t
-        NSLog("[VGI2] Composer/history loaded; fingerprint=%d",nativeCompatible())
+        NSLog("[VGI3] Composer/history loaded; fingerprint=%d",nativeCompatible())
         schedule()
     }
     @objc func schedule() {
@@ -281,23 +302,43 @@ private final class Coordinator: NSObject {
         let t=s.lowercased()
         return t.contains("تم تعديل")||t.contains("عُدّلت")||t.contains("معدّل")||t.contains("معدلة")||t.contains("edited ")||t.contains("изменено")||t.contains("відредаговано")
     }
-    private func history(_ menu: NSObject, menuView: UIView, w: UIWindow) {
+    private func history(_ w:UIWindow,all:[UIView]){
+        var menu:NSObject?
+        // The actual edit-time header is a custom context item, not a ContextMenuActionItem.
+        for v in all { if let n=maybeNode(v),kind(n)==4 { menu=n;break } }
         let chat: UIViewController?
-        if let raw=nativeChat(ptr(menu)) { chat=Unmanaged<AnyObject>.fromOpaque(raw).takeRetainedValue() as? UIViewController }
+        if let p=menu,let raw=nativeChat(ptr(p)) { chat=Unmanaged<AnyObject>.fromOpaque(raw).takeRetainedValue() as? UIViewController }
         else { chat=findChat(w.rootViewController) ?? lastChat }
-        for v in descendants(menuView,limit:3200) {
-            guard let n=node(v), kind(n)==5||kind(n)==6 else { continue }
-            guard let s=nativeActionText(ptr(n)) else { continue }
-            let text=s.assumingMemoryBound(to:String.self).pointee
-            guard isTime(text),v.bounds.height>=28 else { continue }
-            let tv=nodeView(object(nativeActionLabel(ptr(n))))
-            let labelFrame=tv.map { $0.convert($0.bounds,to:v) }
-            let start=max(16,min(v.bounds.width-90,labelFrame?.minX ?? 50))
-            let frame=CGRect(x:start,y:0,width:max(0,v.bounds.width-start-8),height:v.bounds.height)
-            if let old=v.subviews.first(where:{$0 is HistoryAction}) as? HistoryAction { old.frame=frame; tv?.alpha=0; continue }
-            let color: UIColor = v.traitCollection.userInterfaceStyle == .dark ? .white : .label
-            let overlay=HistoryAction(presentation:menu,chat:chat,root:w.rootViewController,nativeText:tv,time:text,color:color)
-            overlay.frame=frame; v.addSubview(overlay); v.bringSubviewToFront(overlay)
+        var seenRows=Set<ObjectIdentifier>()
+        for v in all {
+            guard let n=maybeNode(v),let r=object(nativeReadRow(ptr(n))) as? NSObject,
+                nativeReadIsEdit(ptr(r)) != 0, nativeReadMessage(ptr(r)) != nil,seenRows.insert(ObjectIdentifier(r)).inserted else { continue }
+            let rowView=nodeView(r) ?? v
+            let btn=nodeView(object(nativeReadButton(ptr(r))))
+            let host=btn?.superview ?? rowView
+            guard visible(host),host.bounds.width>=100,host.bounds.height>=25 else{continue}
+            let layer=nodeLayer(object(nativeReadText(ptr(r))))
+            let labelFrame=layer.map{$0.convert($0.bounds,to:host.layer)}
+            let start=max(16,min(host.bounds.width-90,labelFrame?.minX ?? 48))
+            let frame=CGRect(x:start,y:0,width:max(0,host.bounds.width-start-8),height:host.bounds.height)
+            if let old=host.subviews.first(where:{$0 is HistoryAction}) as? HistoryAction {
+                old.frame=frame;layer?.opacity=0;host.bringSubviewToFront(old);continue
+            }
+            let color:UIColor=host.traitCollection.userInterfaceStyle == .dark ? .white : .label
+            let overlay=HistoryAction(presentation:menu,row:r,chat:chat,root:w.rootViewController,nativeText:layer,time:"عرض النص قبل التعديل",color:color)
+            overlay.frame=frame;host.addSubview(overlay);host.bringSubviewToFront(overlay);layer?.opacity=0
+        }
+        // Keep the old action-item path for variants that use an ordinary row.
+        guard let p=menu else{return}
+        for v in all {
+            guard let n=maybeNode(v),kind(n)==5||kind(n)==6,let raw=nativeActionText(ptr(n)) else{continue}
+            let text=raw.assumingMemoryBound(to:String.self).pointee
+            guard isTime(text),v.bounds.height>=28,v.subviews.allSatisfy({!($0 is HistoryAction)}) else{continue}
+            let layer=nodeLayer(object(nativeActionLabel(ptr(n))))
+            let start=max(16,min(v.bounds.width-90,layer.map{$0.convert($0.bounds,to:v.layer).minX} ?? 48))
+            let overlay=HistoryAction(presentation:p,row:nil,chat:chat,root:w.rootViewController,nativeText:layer,time:text,color:v.traitCollection.userInterfaceStyle == .dark ? .white : .label)
+            overlay.frame=CGRect(x:start,y:0,width:v.bounds.width-start-8,height:v.bounds.height)
+            v.addSubview(overlay);v.bringSubviewToFront(overlay);layer?.opacity=0
         }
     }
     @objc func tick() {
@@ -331,16 +372,31 @@ private final class Coordinator: NSObject {
                 }
                 // Native input accessory is rightmost for conventional chat composer. The sibling controls stay intact.
                 guard let a=candidates.max(by:{ $0.convert($0.bounds,to:w).midX < $1.convert($1.bounds,to:w).midX }), let parent=a.superview else { continue }
-                var view: UIView?=parent, panel: NSObject?
-                while let v=view { if let n=node(v), kind(n)==3 { panel=n; break }; view=v.superview }
-                let clip = panel.flatMap { object(nativeClip(ptr($0))) as? UIView } ?? parent.subviews.first(where:{$0.layer.name=="textInputNodeClippingContainer"})
-                let key=ObjectIdentifier(bar); seen.insert(key)
-                let placement=placements[key] ?? ComposerPlacement(bar); placements[key]=placement
-                placement.place(b,stack:stack,anchor:a,parent:parent,panel:panel,clip:clip)
+                var view:UIView?=parent,panel:NSObject?
+                while let v=view { if let n=maybeNode(v),kind(n)==3 { panel=n;break };view=v.superview }
+                let ar=a.convert(a.bounds,to:w)
+                if panel==nil {
+                    panel=all.compactMap{v->NSObject? in
+                        guard let n=maybeNode(v),kind(n)==3 else{return nil}
+                        let r=v.convert(v.bounds,to:w);return abs(r.maxY-ar.midY)<180 ? n:nil
+                    }.first
+                }
+                let clip=panel.flatMap{object(nativeClip(ptr($0))) as? UIView} ??
+                    all.first(where:{$0.layer.name=="textInputNodeClippingContainer" && abs($0.convert($0.bounds,to:w).midY-ar.midY)<120})
+                var editor=panel.flatMap{object(nativeEditor(ptr($0))) as? NSObject}
+                let local=clip.map{descendants($0,limit:500)} ?? all
+                if editor==nil {
+                    editor=local.compactMap{v->NSObject? in
+                        guard let n=maybeNode(v),kind(n)==10,abs(v.convert(v.bounds,to:w).midY-ar.midY)<140 else{return nil}
+                        return n
+                    }.first
+                }
+                let richView=local.first(where:{kind($0)==11 && visible($0) && abs($0.convert($0.bounds,to:w).midY-ar.midY)<140})
+                let key=ObjectIdentifier(bar);seen.insert(key)
+                let placement=placements[key] ?? ComposerPlacement(bar);placements[key]=placement
+                placement.place(b,stack:stack,anchor:a,parent:parent,editor:editor,richView:richView,clip:clip)
             }
-            if nativeCompatible() != 0 {
-                for v in all { if let n=node(v),kind(n)==4 { history(n,menuView:v,w:w) } }
-            }
+            if nativeCompatible() != 0 { history(w,all:all) }
         }
         for k in Array(placements.keys) where !seen.contains(k) { placements.removeValue(forKey:k)?.reset() }
     }
