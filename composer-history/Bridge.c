@@ -255,7 +255,7 @@ void *vgi_archive(void *presentation,void *message,void *chat,void *row){
     return ((archive_fn)(base+0xd85104))(ctx[0],ctx[1],args[0],args[1],args[2],0);
 }
 extern void vgi_views_changed(void);
-static IMP bar_original=0, accessory_original=0, display_original=0;
+static IMP bar_original=0, accessory_original=0, display_original=0, editor_layout_original=0;
 static void bar_moved(id self, SEL cmd){if(bar_original)((void(*)(id,SEL))bar_original)(self,cmd); vgi_views_changed();}
 static void accessory_moved(id self, SEL cmd){if(accessory_original)((void(*)(id,SEL))accessory_original)(self,cmd); vgi_views_changed();}
 static void display_moved(id self, SEL cmd){
@@ -284,7 +284,23 @@ static void install_moved(const char *className, IMP hook, IMP *original){
         *original=method_setImplementation(own,hook);
     }
 }
+static void editor_did_layout(id self,SEL cmd){
+    if(editor_layout_original)((void(*)(id,SEL))editor_layout_original)(self,cmd);
+    vgi_views_changed();
+}
+static void install_editor_layout(void){
+    Class c=objc_lookUpClass("_TtC19RichTextEditorUIKit18RichTextEditorView");
+    if(!c||editor_layout_original)return;
+    SEL sel=sel_registerName("layoutSubviews");
+    Method m=class_getInstanceMethod(c,sel);
+    if(!m)return;
+    editor_layout_original=method_getImplementation(m);
+    if(!class_addMethod(c,sel,(IMP)editor_did_layout,method_getTypeEncoding(m))){
+        editor_layout_original=method_setImplementation(class_getInstanceMethod(c,sel),(IMP)editor_did_layout);
+    }
+}
 void vgi_install_hooks(void){
+    install_editor_layout();
     install_moved("_TtC10TelegramUI14AyuComposerBar",(IMP)bar_moved,&bar_original);
     install_moved("_TtC22ChatTextInputPanelNode23AccessoryItemIconButton",(IMP)accessory_moved,&accessory_original);
     install_moved("_ASDisplayView",(IMP)display_moved,&display_original);

@@ -289,6 +289,7 @@ private final class Coordinator: NSObject {
         nativeInstallHooks()
         NotificationCenter.default.addObserver(self,selector:#selector(schedule),name:UIApplication.didBecomeActiveNotification,object:nil)
         NotificationCenter.default.addObserver(self,selector:#selector(schedule),name:UIWindow.didBecomeVisibleNotification,object:nil)
+        NotificationCenter.default.addObserver(self,selector:#selector(schedule),name:UITextView.textDidChangeNotification,object:nil)
         let t=Timer(timeInterval:0.4,target:self,selector:#selector(tick),userInfo:nil,repeats:true)
         RunLoop.main.add(t,forMode:.common); timer=t
         NSLog("[VGI3] Composer/history loaded; fingerprint=%d",nativeCompatible())
@@ -315,8 +316,8 @@ private final class Coordinator: NSObject {
                 nativeReadIsEdit(ptr(r)) != 0, nativeReadMessage(ptr(r)) != nil,seenRows.insert(ObjectIdentifier(r)).inserted else { continue }
             let rowView=nodeView(r) ?? v
             let btn=nodeView(object(nativeReadButton(ptr(r))))
-            let host=btn?.superview ?? rowView
-            guard visible(host),host.bounds.width>=100,host.bounds.height>=25 else{continue}
+            let host=(rowView.bounds.height>=25 && rowView.bounds.height<=110) ? rowView : (btn?.superview ?? rowView)
+            guard visible(host),host.bounds.width>=100,host.bounds.height>=25,host.bounds.height<=110 else{continue}
             let layer=nodeLayer(object(nativeReadText(ptr(r))))
             let labelFrame=layer.map{$0.convert($0.bounds,to:host.layer)}
             let start=max(16,min(host.bounds.width-90,labelFrame?.minX ?? 48))
