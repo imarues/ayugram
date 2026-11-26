@@ -1,6 +1,8 @@
 import UIKit
 import Foundation
 
+@_silgen_name("vgi_kira_has_history") private func kiraHasHistory(_ key:UnsafeMutableRawPointer) -> Int32
+@_silgen_name("vgi_kira_show_history") private func kiraShowHistory(_ key:UnsafeMutableRawPointer,_ host:UnsafeMutableRawPointer) -> Int32
 @_silgen_name("vgi_set_slot") private func nativeSetSlot(_ enabled: Int32) -> Int32
 @_silgen_name("vgi_editor_view") private func nativeEditorView(_ p: UnsafeMutableRawPointer) -> UnsafeMutableRawPointer?
 @_silgen_name("vgi_compatible") private func nativeCompatible() -> Int32
@@ -50,6 +52,40 @@ private func nodeLayer(_ o: AnyObject?) -> CALayer? {
     return n.responds(to:sel) ? n.perform(sel)?.takeUnretainedValue() as? CALayer : nil
 }
 private func maybeNode(_ view: UIView) -> NSObject? { node(view) ?? (kind(view)>0 ? view : nil) }
+// Match only known native message/header types, reading direct fields with
+// bounded Swift Mirror when a resilient ASDisplayNode has no native view.
+private func child(_ value:Any,_ name:String) -> Any? {
+    var mirror:Mirror?=Mirror(reflecting:value)
+    for _ in 0..<8 {
+        guard let m=mirror else{return nil}
+        if let field=m.children.first(where:{$0.label==name}) { return field.value }
+        mirror=m.superclassMirror
+    }
+    return nil
+}
+private func editRowMessage(_ row:NSObject) -> AnyObject? {
+    if let m=object(nativeReadMessage(ptr(row))) { return m }
+    guard NSStringFromClass(type(of:row)).contains("ChatReadReportContextItemNode"),
+          let item=child(row,"item"),child(item,"isEdit") as? Bool == true,
+          let value=child(item,"message"),String(describing:type(of:value))=="Message" else{return nil}
+    return value as AnyObject
+}
+private func kiraHistoryKey(_ message:AnyObject) -> NSString? {
+    guard let mid=child(message,"id"), let peer=child(mid,"peerId"),
+          let ns=child(peer,"namespace").flatMap({child($0,"rawValue")}),
+          let ident=child(peer,"id").flatMap({child($0,"rawValue")}) as? Int64,
+          let msgNs=child(mid,"namespace") as? Int32, msgNs==0,
+          let id=child(mid,"id") as? Int32,id>0 else{return nil}
+    let namespace=(ns as? UInt32).map{Int32(bitPattern:$0)} ?? (ns as? Int32)
+    guard let namespace, (0...2).contains(namespace),ident>0 else{return nil}
+    let prefix=["u","g","c"][Int(namespace)]
+    return "\(prefix)\(ident):\(id)" as NSString
+}
+private func nativeSubnodes(_ object:NSObject)->[NSObject] {
+    let sel=NSSelectorFromString("subnodes")
+    guard object.responds(to:sel) else{return []}
+    return object.perform(sel)?.takeUnretainedValue() as? [NSObject] ?? []
+}
 private func visible(_ v: UIView) -> Bool {
     guard v.window != nil, !v.bounds.isEmpty else { return false }
     var p: UIView? = v
@@ -261,9 +297,14 @@ private final class HistoryAction: UIButton {
         let chat=self.chat ?? root.flatMap{findChat($0)}
         let rowPtr=row.map(ptr)
         let menuPtr=p.map(ptr)
-        let message=rowPtr.flatMap{nativeReadMessage($0)} ?? menuPtr.flatMap{nativeMessage($0)}
-        guard let m=message,let raw=nativeArchive(menuPtr,m,chat.map(ptr),rowPtr),
-              let archive=Unmanaged<AnyObject>.fromOpaque(raw).takeRetainedValue() as? UIViewController else {
+        let message=row.flatMap{editRowMessage($0)} ?? menuPtr.flatMap{object(nativeMessage($0))}
+        let key=message.flatMap{kiraHistoryKey($0)}
+        let hasKira=key.map{kiraHasHistory(ptr($0)) != 0} ?? false
+        let archive:UIViewController? = hasKira ? nil : message.flatMap{m in
+            guard let raw=nativeArchive(menuPtr,ptr(m),chat.map(ptr),rowPtr) else{return nil}
+            return Unmanaged<AnyObject>.fromOpaque(raw).takeRetainedValue() as? UIViewController
+        }
+        guard hasKira || archive != nil else {
             let presenter=root.map(visibleController) ?? chat
             if let presenter {
                 let a=UIAlertController(title:"سجل التعديلات",message:"تعذر فتح السجل المحلي لهذه الرسالة.",preferredStyle:.alert)
@@ -284,6 +325,8 @@ private final class HistoryAction: UIButton {
         }
         DispatchQueue.main.asyncAfter(deadline:.now()+0.5){[weak chat,weak root=self.root] in
             guard let presenter=chat.map(visibleController) ?? root.map(visibleController) else{return}
+            if let key,hasKira,kiraShowHistory(ptr(key),ptr(presenter)) != 0 { return }
+            guard let archive else{return}
             let container=ArchiveContainer(archive);container.modalPresentationStyle = .pageSheet
             presenter.present(container,animated:true)
         }
@@ -322,10 +365,24 @@ private final class Coordinator: NSObject {
         let chat: UIViewController?
         if let p=menu,let raw=nativeChat(ptr(p)) { chat=Unmanaged<AnyObject>.fromOpaque(raw).takeRetainedValue() as? UIViewController }
         else { chat=findChat(w.rootViewController) ?? lastChat }
-        var seenRows=Set<ObjectIdentifier>()
+        var seenRows=Set<ObjectIdentifier>(),seenNodes=Set<ObjectIdentifier>()
+        var pairs=[(NSObject,UIView)]()
         for v in all {
-            guard let n=maybeNode(v),let r=object(nativeReadRow(ptr(n))) as? NSObject,
-                nativeReadIsEdit(ptr(r)) != 0, nativeReadMessage(ptr(r)) != nil,seenRows.insert(ObjectIdentifier(r)).inserted else { continue }
+            if let n=maybeNode(v),[4,5,6,8,9].contains(kind(n)),seenNodes.insert(ObjectIdentifier(n)).inserted {
+                pairs.append((n,v))
+            }
+        }
+        var cursor=0
+        while cursor<pairs.count && pairs.count<900 {
+            let (n,v)=pairs[cursor];cursor+=1
+            for sub in nativeSubnodes(n) where seenNodes.insert(ObjectIdentifier(sub)).inserted {
+                pairs.append((sub,nodeView(sub) ?? v))
+            }
+        }
+        for (n,v) in pairs {
+            let candidate=object(nativeReadRow(ptr(n))) as? NSObject
+            guard let r=candidate ?? (NSStringFromClass(type(of:n)).contains("ChatReadReportContextItemNode") ? n:nil),
+                editRowMessage(r) != nil,seenRows.insert(ObjectIdentifier(r)).inserted else{continue}
             let rowView=nodeView(r) ?? v
             let btn=nodeView(object(nativeReadButton(ptr(r))))
             let host=(rowView.bounds.height>=25 && rowView.bounds.height<=110) ? rowView : (btn?.superview ?? rowView)

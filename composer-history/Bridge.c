@@ -287,6 +287,25 @@ static void display_moved(id self, SEL cmd){
     if(kind==3||kind==4||kind==5||kind==6||kind==8||kind==9||kind==10)vgi_views_changed();
 }
 #include <objc/message.h>
+// Optional Kira integration: use its own scoped, persisted edit history if
+// available. No dependence on Kira when the standalone IPA is installed.
+int vgi_kira_has_history(void *key) {
+    Class c=objc_lookUpClass("TLParser");
+    SEL sel=sel_registerName("editHistoryForKey:");
+    if(!c||!key||!class_getClassMethod(c,sel))return 0;
+    id array=((id(*)(id,SEL,id))objc_msgSend)((id)c,sel,(id)key);
+    SEL count=sel_registerName("count");
+    return array && class_getInstanceMethod(object_getClass(array),count) &&
+        ((unsigned long(*)(id,SEL))objc_msgSend)(array,count)>0;
+}
+int vgi_kira_show_history(void *key,void *host) {
+    Class c=objc_lookUpClass("LeadEditHistoryViewController");
+    SEL sel=sel_registerName("presentForKey:mediaReplaced:from:");
+    if(!c||!key||!host||!class_getClassMethod(c,sel)||!vgi_kira_has_history(key))return 0;
+    ((void(*)(id,SEL,id,BOOL,id))objc_msgSend)((id)c,sel,(id)key,NO,(id)host);
+    return 1;
+}
+
 void *vgi_node_for_view(void *view){
     if(!view)return 0;
     SEL sel=sel_registerName("asyncdisplaykit_node");
