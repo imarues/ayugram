@@ -198,6 +198,40 @@ static NSString *AGTranslateYearReview(NSString *value) {
     return out;
 }
 
+// Account date notices are assembled from the displayed peer name and a
+// locale-dependent day/month/year. Only call this from identified UI renderers.
+static NSString *AGAccountDateNotice(NSString *value) {
+    if (!value.length || value.length > 512 || !AGArabicEnabled() ||
+        [value rangeOfString:@" created their account "].location == NSNotFound) return nil;
+    static NSRegularExpression *pattern;
+    static NSDictionary<NSString *, NSString *> *months;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        pattern = [NSRegularExpression regularExpressionWithPattern:
+            @"^(.+?)\\s+created their account (approximately on|later than|earlier than)\\s+(?:on\\s+)?([0-9٠-٩۰-۹]{1,2})\\s+([\\p{L}]+)\\s+([0-9٠-٩۰-۹]{4})\\.?$"
+            options:NSRegularExpressionCaseInsensitive error:NULL];
+        months = @{
+            @"января":@"يناير", @"февраля":@"فبراير", @"марта":@"مارس", @"апреля":@"أبريل",
+            @"мая":@"مايو", @"июня":@"يونيو", @"июля":@"يوليو", @"августа":@"أغسطس",
+            @"сентября":@"سبتمبر", @"октября":@"أكتوبر", @"ноября":@"نوفمبر", @"декабря":@"ديسمبر",
+            @"january":@"يناير", @"february":@"فبراير", @"march":@"مارس", @"april":@"أبريل",
+            @"may":@"مايو", @"june":@"يونيو", @"july":@"يوليو", @"august":@"أغسطس",
+            @"september":@"سبتمبر", @"october":@"أكتوبر", @"november":@"نوفمبر", @"december":@"ديسمبر"
+        };
+    });
+    NSString *clean = [value stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    NSTextCheckingResult *m = [pattern firstMatchInString:clean options:0 range:NSMakeRange(0, clean.length)];
+    if (!m || m.range.length != clean.length) return nil;
+    NSString *name = [clean substringWithRange:[m rangeAtIndex:1]];
+    NSString *relation = [[clean substringWithRange:[m rangeAtIndex:2]] lowercaseString];
+    NSString *day = [clean substringWithRange:[m rangeAtIndex:3]];
+    NSString *month = [clean substringWithRange:[m rangeAtIndex:4]];
+    NSString *year = [clean substringWithRange:[m rangeAtIndex:5]];
+    NSString *when = [relation isEqualToString:@"later than"] ? @"بعد" :
+        ([relation isEqualToString:@"earlier than"] ? @"قبل" : @"تقريباً في");
+    return [NSString stringWithFormat:@"أُنشئ حساب %@ %@ %@ %@ %@.", name, when, day, months[month.lowercaseString] ?: month, year];
+}
+
 static NSString *AGExternalExactText(NSString *text) {
     if (!AGArabicEnabled() || ![text isKindOfClass:NSString.class] || !text.length) return text;
     NSString *translated = AGExternalUIMap()[text];
@@ -217,7 +251,9 @@ static BOOL AGScreenshotActionOnly(NSString *text) {
         keys = [NSSet setWithArray:@[@"Shadow ban", @"Shadow Ban",
             @"Export chat / Saved Messages", @"Lock with Face ID", @"Unlock with Face ID",
             @"Remove Face ID lock", @"Hide chat", @"Unhide chat", @"Show hidden chats",
-            @"Pin in \"📌 Pinned\"", @"Shorten (AI)"]];
+            @"Pin in \"📌 Pinned\"", @"Shorten (AI)",
+            @"Unmute Similar", @"Mute Similar", @"Unmute Similar Posts", @"Mute Similar Posts",
+            @"Save Cover", @"Time Capsule", @"Time capsule"]];
     });
     if (text.length > 96 || !text.length) return NO;
     if ([keys containsObject:text]) return YES;
@@ -275,12 +311,15 @@ typedef NS_OPTIONS(uint8_t, AGRendererKind) {
     AGRendererMenu = 1,
     AGRendererProfileAction = 2,
     AGRendererProfileDC = 4,
+    AGRendererAccountDate = 8,
 };
 typedef struct { uintptr_t begin, end; AGRendererKind kind; } AGRendererRange;
 static const uint8_t AGVerifiedUUID[] = {
     0x19,0xf6,0xe4,0xbf,0x5a,0x19,0x3d,0x56,0x9c,0x86,0xa0,0xa1,0xad,0xa2,0x4a,0x52
 };
 static const AGRendererRange AGVerifiedRendererRanges[] = {
+    {0x998434, 0x9985c0, AGRendererAccountDate}, // account creation date string
+    {0x9986f0, 0x999b84, AGRendererAccountDate}, // account date notice builder
     {0x8ebdb4, 0x8ec518, AGRendererProfileAction}, // PeerInfoScreenActionItemNode.update
     {0x9013e4, 0x90194c, AGRendererProfileDC}, // PeerInfoScreenInfoItemNode.update
     {0x905bd0, 0x9087f0, AGRendererProfileDC}, // PeerInfoScreenLabeledValueItemNode.update
@@ -342,6 +381,8 @@ static NSString *AGTranslate(NSString *text);
 static NSString *AGTranslateConstruction(NSString *text) {
     if (![text isKindOfClass:NSString.class] || !text.length || !AGArabicEnabled())
         return text;
+    NSString *dateNotice = AGAccountDateNotice(text);
+    if (dateNotice && AGNativeRendererOnStack() == AGRendererAccountDate) return dateNotice;
     if (text.length <= 96) {
         NSString *menu = AGScreenshotActionOnly(text) ? AGExternalExactText(text) : text;
         NSString *profile = AGProfileActionText(text);
@@ -413,13 +454,17 @@ static BOOL AGIsExternalActionView(UIView *view) {
 
 static NSString *AGScopedExternalNodeText(id node, NSString *value) {
     if (!value.length || !AGArabicEnabled()) return value;
+    NSString *dateNotice = AGAccountDateNotice(value);
+    if (dateNotice && AGIsExternalActionNode(node)) return dateNotice;
     NSString *replacement = AGExternalExactText(value);
     if (![replacement isEqualToString:value] && AGIsExternalActionNode(node)) return replacement;
     return AGScopedProfileNodeText(node, value);
 }
 static NSString *AGScopedExternalViewText(UIView *view, NSString *value) {
     if (!AGArabicEnabled() || !value.length || ![NSThread isMainThread]) return value;
-    NSString *replacement = AGExternalExactText(value);
+    NSString *dateNotice = AGAccountDateNotice(value);
+    if (dateNotice && AGIsExternalActionView(view)) return dateNotice;
+    NSString *replacement = dateNotice ?: AGExternalExactText(value);
     BOOL externalCandidate = ![replacement isEqualToString:value];
     if (externalCandidate && AGIsExternalActionView(view)) return replacement;
     BOOL profileCandidate = ![AGProfileActionText(value) isEqualToString:value] ||

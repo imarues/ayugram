@@ -76,6 +76,7 @@ for action_key in (
     "VoidGram · Copy Message IDs", "Send Logs", "Year in review",
     "Shadow ban", "Export chat / Saved Messages", "Lock with Face ID",
     "Hide chat", "Pin in “📌 Pinned”", "Shorten (AI)",
+    "Unmute Similar", "Mute Similar", "Unmute Similar Posts", "Save Cover", "Time Capsule",
 ):
     if action_key not in external_map:
         raise SystemExit(f"Missing external chat UI action: {action_key}")
@@ -214,3 +215,9 @@ for k in ("Remove Face ID lock", "Show hidden chats"):
 assert "Remove note" in translations
 assert source.count("backtrace(frames, 32)") == 1
 print(f"PASS: {len(translations)} VoidGram translation keys, nested page scope + exit guard, iOS source present")
+
+# The profile creation date must be scoped to a native account renderer or app action overlay.
+assert "AGAccountDateNotice(text)" in source
+assert "AGNativeRendererOnStack() == AGRendererAccountDate" in source
+assert "AGAccountDateNotice(value)" in source
+assert '@"апреля":@"أبريل"' in source
